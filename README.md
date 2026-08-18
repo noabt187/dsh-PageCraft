@@ -16,16 +16,17 @@
 
 ## 界面截图
 
-主截图建议展示：左侧页面预览、元素高亮、右侧评注编辑器和底部 Harness 输入区。
+### 页面评注总览
 
-> 截图待补充：将图片保存为 `docs/screenshots/overview.png`，然后取消下面这一行的注释。
+![dsh-PageCraft 页面评注总览](docs/screenshots/overview.png)
 
-<!-- ![dsh-PageCraft 页面评注界面](docs/screenshots/overview.png) -->
+### DOM 元素选择
 
-还可以补充两张可选图片：
+![dsh-PageCraft DOM 元素选择](docs/screenshots/element-selection.png)
 
-- `docs/screenshots/element-selection.png`：DOM 元素悬停和选中效果。
-- `docs/screenshots/feedback-queue.png`：多条评注队列与滚动效果。
+### 多条评注队列
+
+![dsh-PageCraft 多条评注队列](docs/screenshots/feedback-queue.png)
 
 ## 最快启动方式
 
@@ -153,4 +154,3 @@ npm run check
 - HTML/CSS/JavaScript 交互式幻灯片生成与逐页评注。
 - 移动、缩放、删除、多选和响应式断点评注。
 - 修改前后视觉对比与评注历史。
-
