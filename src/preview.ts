@@ -37,7 +37,7 @@ export function assertPreviewUrl(rawUrl: string, policy: PreviewPolicy = {}): UR
   return url
 }
 
-function htmlEscape(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
     .replaceAll('"', '&quot;')
@@ -46,7 +46,7 @@ function htmlEscape(value: string): string {
 }
 
 export function buildPreviewHtml(html: string, targetUrl: string): string {
-  const baseTag = `<base href="${htmlEscape(targetUrl)}">`
+  const baseTag = `<base href="${escapeHtml(targetUrl)}">`
   const safeScript = ANNOTATOR_SCRIPT.replace(/<\/script/gi, '<\\/script')
   const scriptTag = `<script>${safeScript}</script>`
   const withBase = /<head[^>]*>/i.test(html)

@@ -8,6 +8,8 @@
 
 - 在会话顶部注册独立的 `页面评注` 视图。
 - 直接预览本地开发页面或允许访问的远程页面。
+- 像迷你浏览器一样点击普通链接、提交 GET 搜索表单，并使用后退、前进和刷新。
+- 按会话保存预览网址和最近 50 条浏览历史，切换视图或刷新 Harness 后自动恢复。
 - 开启评注模式后，悬停并点击真实 DOM 元素。
 - 自动采集 URL、CSS selector、DOM path、元素文本和位置。
 - 批量整理多条评注，一次发送给当前 Agent。
@@ -98,7 +100,7 @@ Harness Host 预览路由 ── 获取 HTML、保留资源基址、注入评注
 插件由三部分组成：
 
 1. **客户端视图**：注册 `conversation.view`，提供地址栏、iframe、DOM 选择和评注队列。
-2. **Host 预览路由**：获取目标 HTML，插入 `<base>` 和评注脚本，再返回给受控 iframe。
+2. **Host 预览路由**：获取目标 HTML，插入 `<base>` 和评注脚本，再返回给受控 iframe。页面中的链接和 GET 表单通过 `postMessage` 交回插件，下一页仍经由预览路由加载，因此跳转后仍能继续选取 DOM。
 3. **Frontend Builder Skill**：把结构化的 `[frontend-feedback]` 数据转换为源码修改、验证和刷新流程。
 
 评注发送给 Agent 时包含类似下面的证据：
@@ -144,7 +146,7 @@ npm run check
 
 - 当前代理的是 HTML 入口，不是完整反向代理。依赖目标域 Cookie、Service Worker、严格 CSP 或特殊跨域 ES Module 的网站可能无法完整运行。
 - 远程站点的部分接口和资源仍可能受到浏览器 CORS 策略限制。
-- 页面跳转发生在 iframe 内；重新输入地址或点击刷新可返回开发服务器入口。
+- 迷你浏览器支持普通 HTTP/HTTPS 链接和 GET 表单。POST 登录、文件上传、`window.open`、Service Worker 以及脚本直接修改 `location` 的场景暂不代理。
 - DeepSeek Harness 仍处于 developer preview，升级 Harness 后建议重新执行 `npm run check`。
 
 ## Roadmap
