@@ -21,7 +21,103 @@ export interface PreviewFrameLocation {
   allowSameOrigin: boolean
 }
 
+export interface PreviewNavigationState {
+  entries: string[]
+  index: number
+}
+
+export const DEFAULT_PREVIEW_URL = 'http://localhost:5173'
+export const MAX_PREVIEW_HISTORY_ENTRIES = 50
+
+const PREVIEW_URL_STORAGE_PREFIX = 'dsh-frontend-feedback.preview-url:'
+const PREVIEW_HISTORY_STORAGE_PREFIX = 'dsh-frontend-feedback.preview-history:'
 const LOOPBACK_PREVIEW_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::1]'])
+
+export function previewUrlStorageKey(sessionId: string): string {
+  return `${PREVIEW_URL_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`
+}
+
+export function previewHistoryStorageKey(sessionId: string): string {
+  return `${PREVIEW_HISTORY_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`
+}
+
+export function normalizePreviewUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim().length === 0) return null
+  try {
+    const parsed = new URL(value.trim())
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    return parsed.href
+  } catch {
+    return null
+  }
+}
+
+export function resolvePersistedPreviewUrl(value: string | null | undefined): string {
+  return normalizePreviewUrl(value) ?? DEFAULT_PREVIEW_URL
+}
+
+export function currentPreviewUrl(navigation: PreviewNavigationState): string {
+  return navigation.entries[navigation.index] ?? DEFAULT_PREVIEW_URL
+}
+
+export function pushPreviewNavigation(
+  navigation: PreviewNavigationState,
+  targetUrl: string,
+): PreviewNavigationState {
+  const normalizedTarget = normalizePreviewUrl(targetUrl)
+  if (normalizedTarget === null) throw new Error('只支持有效的 http 或 https 地址')
+  if (currentPreviewUrl(navigation) === normalizedTarget) return navigation
+
+  const entries = [...navigation.entries.slice(0, navigation.index + 1), normalizedTarget]
+    .slice(-MAX_PREVIEW_HISTORY_ENTRIES)
+  return { entries, index: entries.length - 1 }
+}
+
+export function movePreviewNavigation(
+  navigation: PreviewNavigationState,
+  delta: -1 | 1,
+): PreviewNavigationState | null {
+  const index = navigation.index + delta
+  return index < 0 || index >= navigation.entries.length
+    ? null
+    : { ...navigation, index }
+}
+
+export function resolvePersistedPreviewNavigation(
+  value: string | null | undefined,
+  fallbackUrl: string | null | undefined = DEFAULT_PREVIEW_URL,
+): PreviewNavigationState {
+  const fallback = resolvePersistedPreviewUrl(fallbackUrl)
+  if (value === null || value === undefined || value.trim().length === 0) {
+    return { entries: [fallback], index: 0 }
+  }
+
+  try {
+    const parsed = JSON.parse(value) as { entries?: unknown; index?: unknown }
+    if (!Array.isArray(parsed.entries)) return { entries: [fallback], index: 0 }
+
+    const requestedIndex = Number.isInteger(parsed.index) ? Number(parsed.index) : parsed.entries.length - 1
+    const normalized: string[] = []
+    let normalizedIndex = -1
+    parsed.entries.forEach((entry, sourceIndex) => {
+      const url = normalizePreviewUrl(entry)
+      if (url === null) return
+      normalized.push(url)
+      if (sourceIndex <= requestedIndex) normalizedIndex = normalized.length - 1
+    })
+    if (normalized.length === 0) return { entries: [fallback], index: 0 }
+
+    const offset = Math.max(0, normalized.length - MAX_PREVIEW_HISTORY_ENTRIES)
+    const entries = normalized.slice(offset)
+    const index = Math.min(
+      entries.length - 1,
+      Math.max(0, (normalizedIndex < 0 ? 0 : normalizedIndex) - offset),
+    )
+    return { entries, index }
+  } catch {
+    return { entries: [fallback], index: 0 }
+  }
+}
 
 function isLoopbackPreviewHost(hostname: string): boolean {
   const host = hostname.toLowerCase()
@@ -74,6 +170,7 @@ export function resolvePreviewFrameLocation(
   const endpoint = new URL('/api/frontend-feedback/preview', previewOrigin)
   endpoint.searchParams.set('url', target.href)
   endpoint.searchParams.set('revision', String(revision))
+  endpoint.hash = target.hash
   return { src: endpoint.href, allowSameOrigin }
 }
 

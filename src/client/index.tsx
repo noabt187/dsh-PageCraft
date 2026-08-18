@@ -1,10 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { buildAnnotationPrompt, isElementSelection, resolvePreviewFrameLocation } from '../shared.ts'
-import type { ElementComment, ElementSelection } from '../shared.ts'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  buildAnnotationPrompt,
+  currentPreviewUrl,
+  isElementSelection,
+  movePreviewNavigation,
+  normalizePreviewUrl,
+  previewHistoryStorageKey,
+  previewUrlStorageKey,
+  pushPreviewNavigation,
+  resolvePersistedPreviewNavigation,
+  resolvePersistedPreviewUrl,
+  resolvePreviewFrameLocation,
+} from '../shared.ts'
+import type { ElementComment, ElementSelection, PreviewNavigationState } from '../shared.ts'
 
 export const inject = ['slots', 'sessions']
 
 interface FrontendFeedbackInjected {
+  sessionId: string
   sendFeedback(text: string): Promise<void>
 }
 
@@ -12,6 +25,9 @@ interface FeedbackMessage {
   type?: string
   active?: unknown
   payload?: unknown
+  url?: unknown
+  message?: unknown
+  status?: unknown
 }
 
 const colors = {
@@ -37,10 +53,43 @@ function cardTitle(item: ElementSelection): string {
   return text.length > 0 ? `${item.selector} · ${text.slice(0, 42)}` : item.selector
 }
 
-export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected) {
+function readStoredValue(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStoredValue(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value)
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts. The
+    // current component state still keeps the preview usable for this mount.
+  }
+}
+
+function readPersistedPreviewNavigation(sessionId: string): PreviewNavigationState {
+  return resolvePersistedPreviewNavigation(
+    readStoredValue(previewHistoryStorageKey(sessionId)),
+    resolvePersistedPreviewUrl(readStoredValue(previewUrlStorageKey(sessionId))),
+  )
+}
+
+function persistPreviewNavigation(sessionId: string, navigation: PreviewNavigationState): void {
+  writeStoredValue(previewHistoryStorageKey(sessionId), JSON.stringify(navigation))
+  writeStoredValue(previewUrlStorageKey(sessionId), currentPreviewUrl(navigation))
+}
+
+export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedbackInjected) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
-  const [urlDraft, setUrlDraft] = useState('http://localhost:5173')
-  const [loadedUrl, setLoadedUrl] = useState('http://localhost:5173')
+  const previousSessionIdRef = useRef(sessionId)
+  const initialNavigation = useMemo(() => readPersistedPreviewNavigation(sessionId), [sessionId])
+  const navigationRef = useRef(initialNavigation)
+  const initialPreviewUrl = currentPreviewUrl(initialNavigation)
+  const [urlDraft, setUrlDraft] = useState(initialPreviewUrl)
+  const [navigation, setNavigation] = useState(initialNavigation)
   const [revision, setRevision] = useState(0)
   const [active, setActive] = useState(false)
   const [selection, setSelection] = useState<ElementSelection | null>(null)
@@ -48,10 +97,56 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
   const [queued, setQueued] = useState<ElementComment[]>([])
   const [status, setStatus] = useState('打开页面后，点击右下角“元素评注”开始选择。')
   const [sending, setSending] = useState(false)
+  const loadedUrl = currentPreviewUrl(navigation)
+  const canGoBack = navigation.index > 0
+  const canGoForward = navigation.index < navigation.entries.length - 1
 
   const previewFrame = useMemo(() => {
     return resolvePreviewFrameLocation(loadedUrl, window.location.href, revision)
   }, [loadedUrl, revision])
+
+  useEffect(() => {
+    if (previousSessionIdRef.current === sessionId) return
+    previousSessionIdRef.current = sessionId
+    const restoredNavigation = readPersistedPreviewNavigation(sessionId)
+    const restoredUrl = currentPreviewUrl(restoredNavigation)
+    navigationRef.current = restoredNavigation
+    setUrlDraft(restoredUrl)
+    setNavigation(restoredNavigation)
+    setRevision(0)
+    setSelection(null)
+    setActive(false)
+    setComment('')
+    setQueued([])
+    setStatus('正在恢复该会话上次打开的预览…')
+  }, [sessionId])
+
+  const commitNavigation = useCallback((next: PreviewNavigationState, nextStatus: string) => {
+    navigationRef.current = next
+    persistPreviewNavigation(sessionId, next)
+    setNavigation(next)
+    setUrlDraft(currentPreviewUrl(next))
+    setRevision(value => value + 1)
+    setSelection(null)
+    setActive(false)
+    setStatus(nextStatus)
+  }, [sessionId])
+
+  const navigatePreview = useCallback((rawUrl: string, nextStatus = '正在加载预览…') => {
+    try {
+      const targetUrl = normalizePreviewUrl(rawUrl)
+      if (targetUrl === null) throw new Error('只支持有效的 http 或 https 地址')
+      commitNavigation(pushPreviewNavigation(navigationRef.current, targetUrl), nextStatus)
+    } catch (error) {
+      setStatus(`地址无效：${describeError(error)}`)
+    }
+  }, [commitNavigation])
+
+  const moveInHistory = useCallback((delta: -1 | 1) => {
+    const next = movePreviewNavigation(navigationRef.current, delta)
+    if (next === null) return
+    commitNavigation(next, delta < 0 ? '正在返回上一页…' : '正在前往下一页…')
+  }, [commitNavigation])
 
   useEffect(() => {
     const listener = (event: MessageEvent<FeedbackMessage>) => {
@@ -65,10 +160,19 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
         return
       }
       if (event.data?.type === 'dsh-frontend-feedback-error') {
-        const status = typeof (event.data as any).status === 'number' ? `HTTP ${(event.data as any).status}：` : ''
-        const message = typeof (event.data as any).message === 'string' ? (event.data as any).message : '未知错误'
+        const status = typeof event.data.status === 'number' ? `HTTP ${event.data.status}：` : ''
+        const message = typeof event.data.message === 'string' ? event.data.message : '未知错误'
         setActive(false)
         setStatus(`预览失败：${status}${message}`)
+        return
+      }
+      if (event.data?.type === 'dsh-frontend-feedback-navigate' && typeof event.data.url === 'string') {
+        navigatePreview(event.data.url, '正在打开页面中的链接…')
+        return
+      }
+      if (event.data?.type === 'dsh-frontend-feedback-navigation-error') {
+        const message = typeof event.data.message === 'string' ? event.data.message : '当前操作无法在预览中完成。'
+        setStatus(message)
         return
       }
       if (event.data?.type !== 'dsh-frontend-feedback-selected' || !isElementSelection(event.data.payload)) return
@@ -78,20 +182,10 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [])
+  }, [navigatePreview])
 
   const openPreview = () => {
-    try {
-      const parsed = new URL(urlDraft.trim())
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('只支持 http 或 https')
-      setLoadedUrl(parsed.href)
-      setRevision(value => value + 1)
-      setSelection(null)
-      setActive(false)
-      setStatus('正在加载预览…')
-    } catch (error) {
-      setStatus(`地址无效：${describeError(error)}`)
-    }
+    navigatePreview(urlDraft)
   }
 
   const setAnnotatorActive = (next: boolean) => {
@@ -138,6 +232,22 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
           </div>
         </div>
         <div style={styles.addressBar}>
+          <button
+            type="button"
+            aria-label="后退"
+            title="后退"
+            disabled={!canGoBack}
+            onClick={() => moveInHistory(-1)}
+            style={{ ...styles.iconButton, ...(!canGoBack ? styles.iconButtonDisabled : {}) }}
+          >←</button>
+          <button
+            type="button"
+            aria-label="前进"
+            title="前进"
+            disabled={!canGoForward}
+            onClick={() => moveInHistory(1)}
+            style={{ ...styles.iconButton, ...(!canGoForward ? styles.iconButtonDisabled : {}) }}
+          >→</button>
           <input
             aria-label="预览地址"
             value={urlDraft}
@@ -147,7 +257,7 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
             placeholder="http://localhost:5173"
           />
           <button type="button" onClick={openPreview} style={styles.secondaryButton}>打开</button>
-          <button type="button" onClick={() => setRevision(value => value + 1)} style={styles.iconButton} title="刷新预览">↻</button>
+          <button type="button" aria-label="刷新" onClick={() => setRevision(value => value + 1)} style={styles.iconButton} title="刷新预览">↻</button>
           <button
             type="button"
             onClick={() => setAnnotatorActive(!active)}
@@ -167,7 +277,6 @@ export function FrontendFeedbackView({ sendFeedback }: FrontendFeedbackInjected)
               : 'allow-scripts allow-forms allow-modals allow-popups'}
             style={styles.iframe}
             onLoad={() => {
-              setStatus('预览文档已响应，正在等待页面初始化…')
               if (active) setAnnotatorActive(true)
             }}
           />
@@ -260,6 +369,7 @@ export function apply(ctx: any): void {
       const session = ctx.sessions.binding(sessionId)?.session
       if (session === undefined) throw new Error(`frontend-feedback: session "${sessionId}" is unavailable`)
       return {
+        sessionId,
         sendFeedback: async (text) => {
           const result = await session.prompt([{ type: 'text', text }], 'queue')
           if (!result.ok) throw new Error(result.error.message)
@@ -280,6 +390,7 @@ const styles: Record<string, any> = {
   input: { minWidth: 180, maxWidth: 620, flex: 1, height: 36, padding: '0 12px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#0a0f0d', outline: 'none' },
   secondaryButton: { height: 36, padding: '0 14px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer' },
   iconButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontSize: 18 },
+  iconButtonDisabled: { opacity: .35, cursor: 'not-allowed' },
   modeButton: { height: 36, padding: '0 15px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontWeight: 700 },
   modeButtonActive: { color: '#122217', borderColor: colors.accent, background: colors.accentStrong },
   workspace: {

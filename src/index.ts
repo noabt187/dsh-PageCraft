@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import skillMarkdown from '../skills/frontend-page-builder/SKILL.md'
-import { assertPreviewUrl, buildPreviewHtml, readHtmlWithLimit } from './preview.ts'
+import { assertPreviewUrl, buildPreviewHtml, escapeHtml, readHtmlWithLimit } from './preview.ts'
 
 export const name = 'frontend-feedback'
 export const inject = ['webServer', 'skills']
@@ -40,12 +40,12 @@ function markdownBody(source: string): string {
   return source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
 }
 
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export function buildPreviewErrorHtml(status: number, message: string): string {
-  const safeMessage = message
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
+  const safeMessage = escapeHtml(message)
   const payload = JSON.stringify({
     type: 'dsh-frontend-feedback-error',
     status,
@@ -105,7 +105,7 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
   try {
     target = assertPreviewUrl(rawTarget, policy)
   } catch (error) {
-    sendPreviewError(res, 400, error instanceof Error ? error.message : String(error))
+    sendPreviewError(res, 400, describeError(error))
     return
   }
 
@@ -124,7 +124,7 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
     try {
       assertPreviewUrl(upstream.url, policy)
     } catch (error) {
-      sendPreviewError(res, 400, `重定向被拒绝：${error instanceof Error ? error.message : String(error)}`)
+      sendPreviewError(res, 400, `重定向被拒绝：${describeError(error)}`)
       return
     }
     const contentType = upstream.headers.get('content-type')?.toLowerCase() ?? ''
@@ -144,7 +144,7 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
   } catch (error) {
     const message = error instanceof Error && error.name === 'AbortError'
       ? '获取目标页面超时'
-      : `无法获取目标页面：${error instanceof Error ? error.message : String(error)}`
+      : `无法获取目标页面：${describeError(error)}`
     sendPreviewError(res, 502, message)
   } finally {
     clearTimeout(timeout)
@@ -171,4 +171,18 @@ export function apply(ctx: PluginContext, config: Config = {}): void {
 }
 
 export { assertPreviewUrl, buildPreviewHtml, readHtmlWithLimit } from './preview.ts'
-export { buildAnnotationPrompt, isElementSelection, resolvePreviewFrameLocation } from './shared.ts'
+export {
+  DEFAULT_PREVIEW_URL,
+  MAX_PREVIEW_HISTORY_ENTRIES,
+  buildAnnotationPrompt,
+  currentPreviewUrl,
+  isElementSelection,
+  movePreviewNavigation,
+  normalizePreviewUrl,
+  previewHistoryStorageKey,
+  previewUrlStorageKey,
+  pushPreviewNavigation,
+  resolvePersistedPreviewNavigation,
+  resolvePersistedPreviewUrl,
+  resolvePreviewFrameLocation,
+} from './shared.ts'

@@ -13,7 +13,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
   button.type = 'button';
   button.dataset.dshAnnotatorUi = 'toggle';
   button.setAttribute('aria-label', '开启元素评注');
-  button.style.cssText = 'position:fixed;right:22px;bottom:22px;z-index:2147483647;width:66px;height:66px;border:1px solid rgba(255,255,255,.5);border-radius:999px;background:linear-gradient(145deg,#dff3e4,#6f9c79);color:#17351f;box-shadow:0 14px 36px rgba(25,61,35,.3);font:700 13px/1.15 system-ui,sans-serif;cursor:grab;user-select:none;touch-action:none';
+  button.style.cssText = 'position:fixed;right:22px;bottom:22px;z-index:2147483647;width:66px;height:66px;border:1px solid rgba(255,255,255,.5);border-radius:999px;background:linear-gradient(145deg,#dff3e4,#6f9c79);color:#17351f;box-shadow:0 14px 36px rgba(25,61,35,.3);font:700 13px/1.15 system-ui,sans-serif;white-space:pre-line;cursor:grab;user-select:none;touch-action:none';
   root.appendChild(button);
 
   let active = false;
@@ -26,10 +26,14 @@ export const ANNOTATOR_SCRIPT = String.raw`
 
   const isUi = (node) => node instanceof Element && Boolean(node.closest('[data-dsh-annotator-ui]'));
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const post = (message) => window.parent.postMessage(message, '*');
+  const consume = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   function renderState() {
     button.textContent = active ? '结束\n评注' : '元素\n评注';
-    button.style.whiteSpace = 'pre-line';
     button.style.background = active
       ? 'linear-gradient(145deg,#c8ecd2,#438a59)'
       : 'linear-gradient(145deg,#dff3e4,#6f9c79)';
@@ -41,7 +45,15 @@ export const ANNOTATOR_SCRIPT = String.raw`
     active = Boolean(next);
     root.toggleAttribute('data-dsh-annotator-active', active);
     renderState();
-    window.parent.postMessage({ type: 'dsh-frontend-feedback-active', active }, '*');
+    post({ type: 'dsh-frontend-feedback-active', active });
+  }
+
+  function requestNavigation(url) {
+    post({ type: 'dsh-frontend-feedback-navigate', url });
+  }
+
+  function reportNavigationError(message) {
+    post({ type: 'dsh-frontend-feedback-navigation-error', message });
   }
 
   function selectorFor(element) {
@@ -105,10 +117,56 @@ export const ANNOTATOR_SCRIPT = String.raw`
   });
   document.addEventListener('mouseover', (event) => highlight(event.target), true);
   document.addEventListener('click', (event) => {
-    if (!active || !(event.target instanceof Element) || isUi(event.target)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    window.parent.postMessage({ type: 'dsh-frontend-feedback-selected', payload: describe(event.target) }, '*');
+    if (!(event.target instanceof Element) || isUi(event.target)) return;
+    if (active) {
+      consume(event);
+      post({ type: 'dsh-frontend-feedback-selected', payload: describe(event.target) });
+      return;
+    }
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = event.target.closest('a[href]');
+    if (!(anchor instanceof HTMLAnchorElement) || anchor.hasAttribute('download')) return;
+    let target;
+    try {
+      target = new URL(anchor.getAttribute('href') || '', document.baseURI);
+    } catch {
+      return;
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return;
+    consume(event);
+    requestNavigation(target.href);
+  }, true);
+
+  document.addEventListener('submit', (event) => {
+    if (!(event.target instanceof HTMLFormElement) || isUi(event.target)) return;
+    if (active) {
+      consume(event);
+      return;
+    }
+    if (event.defaultPrevented) return;
+    const form = event.target;
+    const method = (form.method || 'get').toUpperCase();
+    consume(event);
+    if (method !== 'GET') {
+      reportNavigationError('迷你浏览器当前仅支持 GET 表单跳转；POST、登录和上传提交暂不代理。');
+      return;
+    }
+    try {
+      const target = new URL(form.action || document.baseURI, document.baseURI);
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') throw new Error('只支持 http 或 https');
+      target.search = '';
+      const data = new FormData(form);
+      const submitter = event.submitter;
+      if (submitter instanceof HTMLButtonElement || submitter instanceof HTMLInputElement) {
+        if (submitter.name) data.append(submitter.name, submitter.value);
+      }
+      for (const [name, value] of data.entries()) {
+        if (typeof value === 'string') target.searchParams.append(name, value);
+      }
+      requestNavigation(target.href);
+    } catch (error) {
+      reportNavigationError('无法打开表单目标：' + (error instanceof Error ? error.message : String(error)));
+    }
   }, true);
 
   button.addEventListener('pointerdown', (event) => {
@@ -122,8 +180,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
     moved = false;
     button.setPointerCapture(pointerId);
     button.style.cursor = 'grabbing';
-    event.preventDefault();
-    event.stopPropagation();
+    consume(event);
   });
   button.addEventListener('pointermove', (event) => {
     if (pointerId !== event.pointerId) return;
@@ -141,8 +198,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
     button.releasePointerCapture(pointerId);
     pointerId = null;
     button.style.cursor = 'grab';
-    event.preventDefault();
-    event.stopPropagation();
+    consume(event);
     if (!moved) setActive(!active);
   });
   button.addEventListener('pointercancel', () => {
@@ -151,11 +207,10 @@ export const ANNOTATOR_SCRIPT = String.raw`
     button.style.cursor = 'grab';
   });
   button.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+    consume(event);
   });
 
   renderState();
-  window.parent.postMessage({ type: 'dsh-frontend-feedback-ready', url: document.baseURI }, '*');
+  post({ type: 'dsh-frontend-feedback-ready', url: document.baseURI });
 })();
 `
