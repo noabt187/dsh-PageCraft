@@ -14,7 +14,8 @@
     "lib/client.js",
     "cordis.patch.yml",
     "skills/frontend-page-builder/SKILL.md",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "dsh": {
     "bundle": {

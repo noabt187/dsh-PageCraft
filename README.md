@@ -1,51 +1,53 @@
 # dsh-PageCraft
 
-面向 DeepSeek Harness Web 的前端构建与可视化评注插件。
+**English** | [简体中文](./README.zh-CN.md)
 
-它把“让 Agent 创建页面 → 在 Harness 中预览 → 点击 DOM 元素写评注 → Agent 修改源码”串成一条连续工作流，不需要在浏览器、截图工具和聊天窗口之间来回切换。
+A frontend building and visual annotation plugin for DeepSeek Harness Web.
 
-## 功能
+It connects the entire workflow—ask an Agent to create a page, preview it inside Harness, click real DOM elements to leave feedback, and let the Agent update the source code—without switching between a browser, screenshot tools, and a chat window.
 
-- 在会话顶部注册独立的 `页面评注` 视图。
-- 直接预览本地开发页面或允许访问的远程页面。
-- 像迷你浏览器一样点击普通链接、提交 GET 搜索表单，并使用后退、前进和刷新。
-- 按会话保存预览网址和最近 50 条浏览历史，切换视图或刷新 Harness 后自动恢复。
-- 开启评注模式后，悬停并点击真实 DOM 元素。
-- 自动采集 URL、CSS selector、DOM path、元素文本和位置。
-- 批量整理多条评注，一次发送给当前 Agent。
-- 内置 `frontend-page-builder` Skill，指导 Agent 初次构建页面并处理后续视觉反馈。
-- 自动避开 Harness 底部任务栏和消息输入框，预览区与评注队列均可独立滚动。
+## Features
 
-## 界面截图
+- Registers a dedicated `Page Feedback` (`页面评注`) view at the top of each conversation.
+- Previews local development pages and permitted remote pages directly inside Harness.
+- Works like a mini browser with normal link navigation, GET search forms, back, forward, and refresh controls.
+- Saves the preview URL and the latest 50 history entries per session, then restores them after switching views or refreshing Harness.
+- Highlights and selects real DOM elements in annotation mode.
+- Collects the page URL, CSS selector, DOM path, element text, and bounding rectangle automatically.
+- Organizes multiple annotations into a queue and sends them to the current Agent in one batch.
+- Bundles the `frontend-page-builder` Skill to guide the Agent through initial page creation and subsequent visual refinements.
+- Avoids the Harness task bar and composer automatically; both the preview and feedback queue remain independently scrollable.
 
-### 页面评注总览
+## Screenshots
 
-![dsh-PageCraft 页面评注总览](docs/screenshots/overview.png)
+### Page feedback overview
 
-### DOM 元素选择
+![dsh-PageCraft page feedback overview](docs/screenshots/overview.png)
 
-![dsh-PageCraft DOM 元素选择](docs/screenshots/element-selection.png)
+### DOM element selection
 
-### 多条评注队列
+![dsh-PageCraft DOM element selection](docs/screenshots/element-selection.png)
 
-![dsh-PageCraft 多条评注队列](docs/screenshots/feedback-queue.png)
+### Multi-item feedback queue
 
-## 最快启动方式
+![dsh-PageCraft feedback queue](docs/screenshots/feedback-queue.png)
 
-下面以已经下载好的 DeepSeek Harness 源码为例。在 Harness 源码根目录执行：
+## Quick start
+
+If you already have the DeepSeek Harness source code, run the following commands from its repository root:
 
 ```powershell
 pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft
 pnpm dsh web
 ```
 
-打开终端输出的 Harness 地址，进入任意会话，顶部会出现 `页面评注` 标签。
+Open the Harness URL printed in the terminal and enter any conversation. A `Page Feedback` (`页面评注`) tab will appear at the top.
 
-这就是普通使用所需的全部启动步骤。插件已经提交构建后的 `lib/`，从 GitHub 安装时不需要再单独编译插件。
+That is all you need for normal use. The repository includes the compiled `lib/` output, so plugins installed from GitHub do not need a separate build step.
 
-## 本地开发安装
+## Local development installation
 
-如果你正在修改本插件，希望 Harness 直接读取本地源码：
+To modify this plugin and let Harness read your local source directly:
 
 ```powershell
 git clone https://github.com/noabt187/dsh-PageCraft.git
@@ -54,71 +56,71 @@ npm install
 npm run build
 ```
 
-然后回到 DeepSeek Harness 源码目录，把插件目录链接到 `web` profile：
+Return to the DeepSeek Harness source directory and link the plugin into the `web` profile:
 
 ```powershell
 pnpm dsh plugin --profile web add D:\path\to\dsh-PageCraft
 pnpm dsh web
 ```
 
-每次修改插件后执行：
+After changing the plugin, run:
 
 ```powershell
 npm run build
 ```
 
-再刷新 Harness 网页即可。使用本地路径安装时，profile 会保留对插件目录的链接，因此通常不需要重复安装。
+Then refresh the Harness page. A local-path installation keeps a link to the plugin directory, so you normally do not need to reinstall it after every change.
 
-## 使用流程
+## Usage
 
-1. 在普通对话中让 Agent 构建并启动一个前端页面。
-2. 切换到 `页面评注`，输入页面地址，例如 `http://localhost:5173`。
-3. 点击 `打开`，确认页面能够在中间预览区显示。
-4. 点击 `开始评注`，再点击需要修改的页面元素。
-5. 在右侧写下修改要求，并加入评注队列。
-6. 可以继续选择其他元素；完成后点击 `发送给 Agent`。
-7. Agent 修改源码后，点击刷新按钮查看结果并继续下一轮。
+1. Ask the Agent in a normal conversation to build and start a frontend page.
+2. Open `Page Feedback` (`页面评注`) and enter the page URL, for example `http://localhost:5173`.
+3. Select `Open` (`打开`) and confirm that the page appears in the central preview area.
+4. Select `Start Annotation` (`开始评注`), then click the page element you want to change.
+5. Describe the requested change in the right sidebar and add it to the feedback queue.
+6. Continue selecting other elements as needed, then select `Send to Agent` (`发送给 Agent`).
+7. After the Agent updates the source code, refresh the preview and continue with another feedback pass.
 
-## 它是怎么工作的
+## How it works
 
 ```text
-目标网页
+Target page
    │
    ▼
-Harness Host 预览路由 ── 获取 HTML、保留资源基址、注入评注脚本
+Harness Host preview route ── fetch HTML, preserve the resource base, inject the annotator
    │
    ▼
-沙箱 iframe ── 悬停高亮、DOM 选择、采集 selector/path/rect
+Sandboxed iframe ── hover highlight, DOM selection, collect selector/path/rect
    │ postMessage
    ▼
-页面评注视图 ── 编辑和整理评注队列
+Page Feedback view ── edit and organize the feedback queue
    │ session.prompt(..., "queue")
    ▼
-当前 Agent ── 加载 frontend-page-builder Skill、定位源码并修改
+Current Agent ── load the frontend-page-builder Skill, locate source files, apply changes
 ```
 
-插件由三部分组成：
+The plugin consists of three parts:
 
-1. **客户端视图**：注册 `conversation.view`，提供地址栏、iframe、DOM 选择和评注队列。
-2. **Host 预览路由**：获取目标 HTML，插入 `<base>` 和评注脚本，再返回给受控 iframe。页面中的链接和 GET 表单通过 `postMessage` 交回插件，下一页仍经由预览路由加载，因此跳转后仍能继续选取 DOM。
-3. **Frontend Builder Skill**：把结构化的 `[frontend-feedback]` 数据转换为源码修改、验证和刷新流程。
+1. **Client view**: registers a `conversation.view` containing the address bar, iframe, DOM selector, and feedback queue.
+2. **Host preview route**: fetches the target HTML, inserts a `<base>` element and the annotation script, then returns it to a controlled iframe. Links and GET forms are passed back to the plugin through `postMessage`, so subsequent pages are still loaded through the preview route and remain annotatable.
+3. **Frontend Builder Skill**: turns structured `[frontend-feedback]` data into a source-editing, verification, and refresh workflow.
 
-评注发送给 Agent 时包含类似下面的证据：
+Feedback sent to the Agent contains evidence like this:
 
 ```text
-页面 URL: http://localhost:5173/
+Page URL: http://localhost:5173/
 CSS selector: #hero-title
 DOM path: html > body > main > section > h1
-元素文本: Build faster
-矩形位置: x=120, y=84, width=420, height=72
-修改要求: 标题更醒目，并增加一行产品说明
+Element text: Build faster
+Bounding rectangle: x=120, y=84, width=420, height=72
+Requested change: Make the title more prominent and add a product description below it
 ```
 
-坐标用于提供视觉上下文，Agent 仍会优先修改原有 React/Vue/HTML/CSS 结构，而不是机械地添加绝对定位样式。
+Coordinates provide visual context. The Agent still prioritizes the existing React, Vue, HTML, and CSS source structure instead of mechanically adding absolute-positioned styles.
 
-## 配置
+## Configuration
 
-插件默认允许代理 HTTP/HTTPS 页面，并设置 5 MiB HTML 上限与 15 秒请求超时。可以在 Harness profile 中调整：
+By default, the plugin can proxy HTTP and HTTPS pages, with a 5 MiB HTML limit and a 15-second request timeout. You can adjust these values in the Harness profile:
 
 ```yaml
 - id: frontend-feedback
@@ -131,28 +133,28 @@ DOM path: html > body > main > section > h1
     requestTimeoutMs: 15000
 ```
 
-如果只评注本机页面，可将 `allowRemoteHosts` 设置为 `false`，并通过 `allowedHosts` 单独放行其他主机。
+If you only annotate local pages, set `allowRemoteHosts` to `false` and use `allowedHosts` to permit individual additional hosts.
 
-## 开发与验证
+## Development and verification
 
 ```powershell
 npm install
 npm run check
 ```
 
-`npm run check` 会依次执行构建、自动化测试和 npm 包内容检查。构建产物位于 `lib/`。
+`npm run check` runs the build, automated tests, and npm package-content validation in sequence. Compiled output is written to `lib/`.
 
-## 已知限制
+## Known limitations
 
-- 当前代理的是 HTML 入口，不是完整反向代理。依赖目标域 Cookie、Service Worker、严格 CSP 或特殊跨域 ES Module 的网站可能无法完整运行。
-- 远程站点的部分接口和资源仍可能受到浏览器 CORS 策略限制。
-- 迷你浏览器支持普通 HTTP/HTTPS 链接和 GET 表单。POST 登录、文件上传、`window.open`、Service Worker 以及脚本直接修改 `location` 的场景暂不代理。
-- DeepSeek Harness 仍处于 developer preview，升级 Harness 后建议重新执行 `npm run check`。
+- The plugin proxies the HTML entry document, not the entire website. Sites that rely on target-domain cookies, Service Workers, strict CSP policies, or special cross-origin ES modules may not work completely.
+- Some APIs and assets on remote sites may still be restricted by browser CORS policies.
+- The mini browser supports normal HTTP/HTTPS links and GET forms. POST login, file uploads, `window.open`, Service Workers, and scripts that directly modify `location` are not proxied yet.
+- DeepSeek Harness is still in developer preview. Run `npm run check` again after upgrading Harness.
 
 ## Roadmap
 
-- 空白区域拖拽框选，并发送四顶点、归一化坐标、最近容器和截图给 Agent。
-- 在没有现成 DOM 元素的位置新增组件。
-- HTML/CSS/JavaScript 交互式幻灯片生成与逐页评注。
-- 移动、缩放、删除、多选和响应式断点评注。
-- 修改前后视觉对比与评注历史。
+- Drag-select empty areas and send four corner points, normalized coordinates, the nearest container, and a screenshot to the Agent.
+- Add new components where no existing DOM element is available.
+- Generate interactive HTML/CSS/JavaScript slide decks and annotate individual slides.
+- Move, resize, delete, multi-select, and annotate responsive breakpoints.
+- Compare before-and-after visuals and retain annotation history.
