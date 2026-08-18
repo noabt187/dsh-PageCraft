@@ -1,0 +1,64 @@
+{
+  "name": "dsh-frontend-feedback",
+  "version": "0.1.1",
+  "description": "DeepSeek Harness plugin for building, previewing, annotating, and refining frontend pages",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "skills/frontend-page-builder/SKILL.md",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "check": "npm run build && npm test && npm pack --dry-run --cache .npm-cache"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.5 <0.2.0",
+    "@deepseek-ai/dsh-skill": ">=0.1.0-rc.5 <0.2.0",
+    "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
+    "@deepseek-ai/dsh-host-webserver": { "optional": true },
+    "@deepseek-ai/dsh-skill": { "optional": true },
+    "react": { "optional": true }
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "tsx": "^4.20.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noabt187/dsh-PageCraft.git"
+  },
+  "homepage": "https://github.com/noabt187/dsh-PageCraft#readme",
+  "bugs": {
+    "url": "https://github.com/noabt187/dsh-PageCraft/issues"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}

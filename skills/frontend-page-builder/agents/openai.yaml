@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Page Builder"
+  short_description: "Build and refine frontend pages with DOM feedback"
+  default_prompt: "Build a polished frontend page, then use DOM annotation feedback for focused refinements."
