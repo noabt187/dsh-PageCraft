@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   buildAnnotationPrompt,
   currentPreviewUrl,
@@ -19,6 +20,11 @@ export const inject = ['slots', 'sessions']
 interface FrontendFeedbackInjected {
   sessionId: string
   sendFeedback(text: string): Promise<void>
+  hasSession: boolean
+}
+
+interface FrontendFeedbackViewProps extends FrontendFeedbackInjected {
+  onClose?: () => void
 }
 
 interface FeedbackMessage {
@@ -82,7 +88,7 @@ function persistPreviewNavigation(sessionId: string, navigation: PreviewNavigati
   writeStoredValue(previewUrlStorageKey(sessionId), currentPreviewUrl(navigation))
 }
 
-export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedbackInjected) {
+export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onClose }: FrontendFeedbackViewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const previousSessionIdRef = useRef(sessionId)
   const initialNavigation = useMemo(() => readPersistedPreviewNavigation(sessionId), [sessionId])
@@ -95,7 +101,11 @@ export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedba
   const [selection, setSelection] = useState<ElementSelection | null>(null)
   const [comment, setComment] = useState('')
   const [queued, setQueued] = useState<ElementComment[]>([])
-  const [status, setStatus] = useState('打开页面后，点击右下角“元素评注”开始选择。')
+  const [status, setStatus] = useState(
+    hasSession
+      ? '打开页面后，点击右下角“元素评注”开始选择。'
+      : '当前是空白会话，页面预览和评注可先行使用；若要发送给 Agent，请先发起一条消息创建会话。',
+  )
   const [sending, setSending] = useState(false)
   const loadedUrl = currentPreviewUrl(navigation)
   const canGoBack = navigation.index > 0
@@ -207,6 +217,10 @@ export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedba
     const comments = [...queued]
     if (selection !== null && comment.trim().length > 0) comments.push(commentFrom(selection, comment))
     if (comments.length === 0) return
+    if (!hasSession) {
+      setStatus('当前还没有会话，无法发送到 Agent。先创建会话后再发送。')
+      return
+    }
     setSending(true)
     try {
       await sendFeedback(buildAnnotationPrompt(comments))
@@ -263,7 +277,11 @@ export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedba
             onClick={() => setAnnotatorActive(!active)}
             style={{ ...styles.modeButton, ...(active ? styles.modeButtonActive : {}) }}
           >{active ? '结束评注' : '开始评注'}</button>
+          {onClose !== undefined ? (
+            <button type="button" aria-label="关闭页面评注" title="关闭" onClick={onClose} style={styles.closeButton}>×</button>
+          ) : null}
         </div>
+        {!hasSession ? <div style={styles.sessionHint}>先发一条消息后，右侧“发送给 Agent”才可提交。</div> : null}
       </div>
 
       <div style={styles.workspace}>
@@ -347,7 +365,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedba
               <span style={styles.status}>{status}</span>
               <button
                 type="button"
-                disabled={sending || (queued.length === 0 && (selection === null || comment.trim().length === 0))}
+                disabled={sending || !hasSession || (queued.length === 0 && (selection === null || comment.trim().length === 0))}
                 onClick={() => { void sendAll() }}
                 style={styles.sendButton}
               >{sending ? '发送中…' : '发送给 Agent'}</button>
@@ -359,24 +377,82 @@ export function FrontendFeedbackView({ sessionId, sendFeedback }: FrontendFeedba
   )
 }
 
+function feedbackInjected(ctx: any, sessionId: string): FrontendFeedbackInjected {
+  const sessionBinding = typeof ctx.sessions?.binding === 'function'
+    ? ctx.sessions.binding(sessionId)
+    : undefined
+  const session = sessionBinding?.session
+  if (session === undefined) {
+    return {
+      sessionId,
+      hasSession: false,
+      sendFeedback: async () => {
+        throw new Error('当前状态未关联会话。请先发送一条消息创建会话后再使用。')
+      },
+    }
+  }
+  return {
+    sessionId,
+    hasSession: true,
+    sendFeedback: async (text) => {
+      const result = await session.prompt([{ type: 'text', text }], 'queue')
+      if (!result.ok) throw new Error(result.error.message)
+    },
+  }
+}
+
+export function FrontendFeedbackLauncher(props: FrontendFeedbackInjected) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open])
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label="打开页面评注"
+        title="打开页面评注"
+        onClick={() => setOpen(true)}
+        style={styles.launcherButton}
+      >
+        <span aria-hidden="true" style={styles.launcherIcon}>▣</span>
+        <span>页面评注</span>
+      </button>
+      {open ? createPortal(
+        <div role="dialog" aria-modal="true" aria-label="页面评注" style={styles.launcherOverlay}>
+          <div style={styles.launcherPanel}>
+            <FrontendFeedbackView {...props} onClose={() => setOpen(false)} />
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </>
+  )
+}
+
 export function apply(ctx: any): void {
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view',
     id: 'frontend-feedback',
     order: 20,
     label: () => '页面评注',
-    inject: (sessionId: string): FrontendFeedbackInjected => {
-      const session = ctx.sessions.binding(sessionId)?.session
-      if (session === undefined) throw new Error(`frontend-feedback: session "${sessionId}" is unavailable`)
-      return {
-        sessionId,
-        sendFeedback: async (text) => {
-          const result = await session.prompt([{ type: 'text', text }], 'queue')
-          if (!result.ok) throw new Error(result.error.message)
-        },
-      }
-    },
+    inject: (sessionId: string): FrontendFeedbackInjected => feedbackInjected(ctx, sessionId),
   }, FrontendFeedbackView))
+
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left',
+    id: 'frontend-feedback-launcher',
+    order: 30,
+    label: () => '页面评注',
+    inject: (sessionId: string): FrontendFeedbackInjected => feedbackInjected(ctx, sessionId),
+  }, FrontendFeedbackLauncher))
 }
 
 const styles: Record<string, any> = {
@@ -393,6 +469,7 @@ const styles: Record<string, any> = {
   iconButtonDisabled: { opacity: .35, cursor: 'not-allowed' },
   modeButton: { height: 36, padding: '0 15px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontWeight: 700 },
   modeButtonActive: { color: '#122217', borderColor: colors.accent, background: colors.accentStrong },
+  closeButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#2a211f', cursor: 'pointer', fontSize: 22, lineHeight: 1 },
   workspace: {
     flex: 1,
     minHeight: 0,
@@ -432,5 +509,10 @@ const styles: Record<string, any> = {
   primaryButton: { height: 32, padding: '0 12px', border: 0, borderRadius: 7, color: '#102016', background: colors.accentStrong, cursor: 'pointer', fontWeight: 700 },
   footer: { padding: 12, borderTop: `1px solid ${colors.border}` },
   status: { display: 'block', minHeight: 32, color: colors.muted, fontSize: 10, lineHeight: 1.4 },
+  sessionHint: { width: '100%', fontSize: 11, marginTop: 8, padding: '6px 10px', borderRadius: 6, color: colors.accentStrong, background: '#1a2b23', border: `1px solid ${colors.border}` },
   sendButton: { width: '100%', height: 38, marginTop: 8, border: `1px solid ${colors.accent}`, borderRadius: 8, color: '#102016', background: colors.accentStrong, cursor: 'pointer', fontWeight: 800 },
+  launcherButton: { height: 30, display: 'inline-flex', alignItems: 'center', gap: 6, padding: '0 9px', border: 0, borderRadius: 7, color: 'var(--dsw-alias-label-secondary, #c2cbc5)', background: 'transparent', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' },
+  launcherIcon: { color: colors.accent, fontSize: 14, lineHeight: 1 },
+  launcherOverlay: { position: 'fixed', inset: 0, zIndex: 10000, padding: 16, boxSizing: 'border-box', background: 'rgba(4, 7, 6, .72)', backdropFilter: 'blur(4px)' },
+  launcherPanel: { width: '100%', height: '100%', minWidth: 0, minHeight: 0, overflow: 'hidden', border: `1px solid ${colors.border}`, borderRadius: 14, background: '#0e1311', boxShadow: '0 24px 80px rgba(0, 0, 0, .55)' },
 }
