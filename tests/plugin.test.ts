@@ -9,6 +9,8 @@ import {
   buildPreviewErrorHtml,
   buildPreviewHtml,
   currentPreviewUrl,
+  isAreaSelection,
+  isFeedbackSelection,
   movePreviewNavigation,
   normalizePreviewUrl,
   pushPreviewNavigation,
@@ -33,8 +35,17 @@ test('preview HTML receives base URL and annotator before body close', () => {
   const result = buildPreviewHtml('<html><head><title>x</title></head><body>Hello</body></html>', 'http://localhost:5173/path/')
   assert.match(result, /<head><base href="http:\/\/localhost:5173\/path\/">/)
   assert.match(result, /dsh-frontend-feedback-selected/)
+  assert.match(result, /dsh-frontend-feedback-set-mode/)
+  assert.match(result, /dsh-frontend-feedback-selection-error/)
+  assert.match(result, /area-capture/)
+  assert.match(result, /data-dsh-resize-handle/)
+  assert.match(result, /确认选区/)
+  assert.match(result, /dsh-frontend-feedback-area-draft/)
   assert.match(result, /dsh-frontend-feedback-navigate/)
   assert.equal(result.match(/document\.addEventListener\('click'/g)?.length, 1)
+  const injectedScript = result.match(/<script>([\s\S]*dsh-frontend-feedback-selected[\s\S]*)<\/script>/)?.[1]
+  assert.ok(injectedScript)
+  assert.doesNotThrow(() => new Function(injectedScript))
   assert.ok(result.indexOf('dsh-frontend-feedback-selected') < result.indexOf('</body>'))
 })
 
@@ -139,6 +150,79 @@ test('annotation prompt retains source evidence and implementation contract', ()
   assert.match(prompt, /CSS selector: #submit/)
   assert.match(prompt, /修改要求: 改成更醒目的主按钮/)
   assert.throws(() => buildAnnotationPrompt([]), /至少需要/)
+})
+
+test('area selections retain four corners, alignment evidence, and responsive implementation guidance', () => {
+  const area = {
+    kind: 'area' as const,
+    url: 'http://localhost:5173/dashboard',
+    coordinateSpace: 'viewport' as const,
+    rawRect: { x: 297, y: 161, width: 246, height: 178 },
+    rect: { x: 296, y: 160, width: 248, height: 176 },
+    pageRect: { x: 296, y: 560, width: 248, height: 176 },
+    rawCorners: {
+      topLeft: { x: 297, y: 161 },
+      topRight: { x: 543, y: 161 },
+      bottomRight: { x: 543, y: 339 },
+      bottomLeft: { x: 297, y: 339 },
+    },
+    corners: {
+      topLeft: { x: 296, y: 160 },
+      topRight: { x: 544, y: 160 },
+      bottomRight: { x: 544, y: 336 },
+      bottomLeft: { x: 296, y: 336 },
+    },
+    pageCorners: {
+      topLeft: { x: 296, y: 560 },
+      topRight: { x: 544, y: 560 },
+      bottomRight: { x: 544, y: 736 },
+      bottomLeft: { x: 296, y: 736 },
+    },
+    viewport: { width: 1280, height: 720, scrollX: 0, scrollY: 400, devicePixelRatio: 1.25 },
+    normalized: { left: 0.2313, top: 0.2222, width: 0.1938, height: 0.2444 },
+    alignment: {
+      snapped: true,
+      threshold: 8,
+      guides: [{
+        axis: 'x' as const,
+        coordinate: 296,
+        anchor: 'left edge',
+        source: 'dom' as const,
+        sourceSelector: '.stats-grid > article',
+        distance: 1,
+      }],
+    },
+    container: {
+      tagName: 'section',
+      selector: '.stats-grid',
+      relation: 'container' as const,
+      rect: { x: 64, y: 120, width: 1152, height: 480 },
+      distance: 0,
+    },
+    nearby: [{
+      tagName: 'article',
+      selector: '.stats-grid > article',
+      relation: 'nearby' as const,
+      rect: { x: 64, y: 160, width: 216, height: 176 },
+      distance: 16,
+    }],
+    comment: '新增一个趋势卡片，与左侧统计卡片顶边对齐',
+  }
+
+  assert.equal(isAreaSelection(area), true)
+  assert.equal(isFeedbackSelection(area), true)
+  assert.equal(isAreaSelection({
+    ...area,
+    alignment: { ...area.alignment, guides: Array.from({ length: 9 }, () => area.alignment.guides[0]) },
+  }), false)
+  const prompt = buildAnnotationPrompt([area])
+  assert.match(prompt, /区域框选（可新增 DOM）/)
+  assert.match(prompt, /原始视口四点: top-left=\(297, 161\)/)
+  assert.match(prompt, /视口四点: top-left=\(296, 160\).*bottom-left=\(296, 336\)/)
+  assert.match(prompt, /建议容器: container: <section> \.stats-grid/)
+  assert.match(prompt, /\.stats-grid > article/)
+  assert.match(prompt, /优先使用现有 Grid\/Flex/)
+  assert.match(prompt, /避免机械生成 viewport-specific absolute positioning/)
 })
 
 test('response reader enforces the configured byte limit', async () => {
