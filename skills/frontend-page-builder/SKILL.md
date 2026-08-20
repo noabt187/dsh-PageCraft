@@ -1,6 +1,6 @@
 ---
 name: frontend-page-builder
-description: Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, or selector-specific iteration requests.
+description: Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM or area annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, selector-specific iteration, or adding content inside a user-drawn region.
 ---
 
 # Frontend Page Builder
@@ -25,18 +25,21 @@ Build a usable, visually coherent page in the project's existing frontend stack,
 
 ## Annotation refinement
 
-1. Treat every annotation as a requirement tied to a concrete rendered element, not as a request to edit the DOM output directly.
-2. Locate the owning source component using this evidence in order: unique selector or id, visible text, DOM path, nearby component structure, then viewport rectangle. Selectors from generated CSS or CSS Modules are hints, not guaranteed source identifiers.
-3. Read the surrounding component and styles before editing. Determine whether the requested change belongs in markup, local styles, shared tokens, content data, or behavior.
-4. Batch compatible annotations by owning component. If two annotations conflict, prefer the more specific requirement and explicitly report the conflict rather than silently guessing.
-5. Make the smallest coherent source change that satisfies the feedback while preserving unmentioned behavior, responsiveness, accessibility, and the page's established visual system.
-6. Verify the changed state at relevant viewport sizes. Re-run targeted tests and the normal frontend build. If the preview server is running, ask the user to refresh and make another annotation pass when useful.
+1. Distinguish `DOM 元素` annotations from `区域框选` annotations. A DOM annotation targets an existing rendered element; an area annotation may request a new component where no DOM exists yet.
+2. For a DOM annotation, locate the owning source component using this evidence in order: unique selector or id, visible text, DOM path, nearby component structure, then viewport rectangle. Selectors from generated CSS or CSS Modules are hints, not guaranteed source identifiers.
+3. For an area annotation, use the suggested container and nearby selectors to find the owning layout component. The user may have moved and resized the retained selection before confirming it, so treat the final snapped four-corner coordinates as the strongest placement evidence and the raw coordinates as visual intent. Then inspect the component's Grid/Flex rules, siblings, breakpoints, spacing tokens, and content flow before deciding where to insert markup.
+4. Resolve imperfect area drawing by preferring, in order: an existing container boundary, shared sibling edge or center line, established grid track, design-system spacing, then the snapped rectangle. Use the raw rectangle only as secondary evidence. If two equally plausible placements would produce materially different UI, ask one focused question.
+5. Read the surrounding component and styles before editing. Determine whether the requested change belongs in markup, local styles, shared tokens, content data, or behavior.
+6. Batch compatible annotations by owning component. If two annotations conflict, prefer the more specific requirement and explicitly report the conflict rather than silently guessing.
+7. Make the smallest coherent source change that satisfies the feedback while preserving unmentioned behavior, responsiveness, accessibility, and the page's established visual system.
+8. Verify the changed state at relevant viewport sizes. Re-run targeted tests and the normal frontend build. If the preview server is running, ask the user to refresh and make another annotation pass when useful.
 
 ## Quality bar
 
 - Preserve the project's architecture and state/data flow.
 - Prefer semantic elements and visible keyboard focus; maintain readable contrast and usable touch targets.
-- Avoid hard-coded viewport-specific coordinates. The annotation rectangle describes where the element was observed, not where it must be positioned.
+- Avoid hard-coded viewport-specific coordinates. Element and area rectangles describe where the intent was observed, not where content must be absolutely positioned.
+- When adding content from an area selection, prefer normal document flow, Grid, or Flex. Use absolute positioning only when the surrounding component already establishes an intentional positioning context.
 - Avoid broad global CSS changes for a local comment unless the feedback clearly identifies a system-wide rule.
 - Keep copy specific and production-like. Do not leave lorem ipsum, unexplained placeholders, fake metrics presented as real data, or nonfunctional primary controls.
 - Do not claim visual verification unless the page was actually rendered or inspected. State any remaining verification gap plainly.

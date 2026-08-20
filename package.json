@@ -1,6 +1,6 @@
 {
   "name": "dsh-frontend-feedback",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "DeepSeek Harness plugin for building, previewing, annotating, and refining frontend pages",
   "type": "module",
   "main": "lib/index.js",

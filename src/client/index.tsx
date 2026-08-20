@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   buildAnnotationPrompt,
   currentPreviewUrl,
-  isElementSelection,
+  isFeedbackSelection,
   movePreviewNavigation,
   normalizePreviewUrl,
   previewHistoryStorageKey,
@@ -13,7 +13,7 @@ import {
   resolvePersistedPreviewUrl,
   resolvePreviewFrameLocation,
 } from '../shared.ts'
-import type { ElementComment, ElementSelection, PreviewNavigationState } from '../shared.ts'
+import type { FeedbackComment, FeedbackSelection, PreviewNavigationState } from '../shared.ts'
 
 export const inject = ['slots', 'sessions']
 
@@ -30,6 +30,7 @@ interface FrontendFeedbackViewProps extends FrontendFeedbackInjected {
 interface FeedbackMessage {
   type?: string
   active?: unknown
+  mode?: unknown
   payload?: unknown
   url?: unknown
   message?: unknown
@@ -50,13 +51,35 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function commentFrom(selection: ElementSelection, comment: string): ElementComment {
-  return { ...selection, comment: comment.trim() }
+type SelectionMode = 'element' | 'area'
+
+function commentFrom(selection: FeedbackSelection, comment: string): FeedbackComment {
+  return { ...selection, comment: comment.trim() } as FeedbackComment
 }
 
-function cardTitle(item: ElementSelection): string {
+function cardTitle(item: FeedbackSelection): string {
+  if (item.kind === 'area') {
+    return `区域 ${item.rect.width} × ${item.rect.height} · (${item.rect.x}, ${item.rect.y})`
+  }
   const text = item.text.trim()
   return text.length > 0 ? `${item.selector} · ${text.slice(0, 42)}` : item.selector
+}
+
+function selectionCode(item: FeedbackSelection): string {
+  if (item.kind !== 'area') return item.selector
+  const { topLeft, topRight, bottomRight, bottomLeft } = item.corners
+  return `TL(${topLeft.x},${topLeft.y}) · TR(${topRight.x},${topRight.y}) · BR(${bottomRight.x},${bottomRight.y}) · BL(${bottomLeft.x},${bottomLeft.y})`
+}
+
+function selectionSummary(item: FeedbackSelection): string {
+  if (item.kind !== 'area') return item.text
+  const guideCount = item.alignment.guides.length
+  const container = item.container?.selector
+  return [
+    `框选 ${item.rect.width} × ${item.rect.height}px`,
+    guideCount > 0 ? `已使用 ${guideCount} 条对齐参考` : '未找到明确对齐参考，模型将结合周围布局判断',
+    container === undefined ? '' : `建议容器：${container}`,
+  ].filter(Boolean).join(' · ')
 }
 
 function readStoredValue(key: string): string | null {
@@ -97,13 +120,13 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
   const [urlDraft, setUrlDraft] = useState(initialPreviewUrl)
   const [navigation, setNavigation] = useState(initialNavigation)
   const [revision, setRevision] = useState(0)
-  const [active, setActive] = useState(false)
-  const [selection, setSelection] = useState<ElementSelection | null>(null)
+  const [selectionMode, setSelectionMode] = useState<SelectionMode | null>(null)
+  const [selection, setSelection] = useState<FeedbackSelection | null>(null)
   const [comment, setComment] = useState('')
-  const [queued, setQueued] = useState<ElementComment[]>([])
+  const [queued, setQueued] = useState<FeedbackComment[]>([])
   const [status, setStatus] = useState(
     hasSession
-      ? '打开页面后，点击右下角“元素评注”开始选择。'
+      ? '打开页面后，可选择已有 DOM 元素，也可以框选空白区域新增内容。'
       : '当前是空白会话，页面预览和评注可先行使用；若要发送给 Agent，请先发起一条消息创建会话。',
   )
   const [sending, setSending] = useState(false)
@@ -125,7 +148,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
     setNavigation(restoredNavigation)
     setRevision(0)
     setSelection(null)
-    setActive(false)
+    setSelectionMode(null)
     setComment('')
     setQueued([])
     setStatus('正在恢复该会话上次打开的预览…')
@@ -138,7 +161,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
     setUrlDraft(currentPreviewUrl(next))
     setRevision(value => value + 1)
     setSelection(null)
-    setActive(false)
+    setSelectionMode(null)
     setStatus(nextStatus)
   }, [sessionId])
 
@@ -162,17 +185,20 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
     const listener = (event: MessageEvent<FeedbackMessage>) => {
       if (event.source !== iframeRef.current?.contentWindow) return
       if (event.data?.type === 'dsh-frontend-feedback-active') {
-        setActive(Boolean(event.data.active))
+        const nextMode = event.data.mode === 'element' || event.data.mode === 'area'
+          ? event.data.mode
+          : null
+        setSelectionMode(Boolean(event.data.active) ? nextMode : null)
         return
       }
       if (event.data?.type === 'dsh-frontend-feedback-ready') {
-        setStatus('预览已加载。需要选择元素时开启评注模式。')
+        setStatus('预览已加载。可选择 DOM 元素，或拖动框选区域来新增内容。')
         return
       }
       if (event.data?.type === 'dsh-frontend-feedback-error') {
         const status = typeof event.data.status === 'number' ? `HTTP ${event.data.status}：` : ''
         const message = typeof event.data.message === 'string' ? event.data.message : '未知错误'
-        setActive(false)
+        setSelectionMode(null)
         setStatus(`预览失败：${status}${message}`)
         return
       }
@@ -185,10 +211,29 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
         setStatus(message)
         return
       }
-      if (event.data?.type !== 'dsh-frontend-feedback-selected' || !isElementSelection(event.data.payload)) return
+      if (event.data?.type === 'dsh-frontend-feedback-selection-error') {
+        const message = typeof event.data.message === 'string' ? event.data.message : '框选失败，请重新拖动。'
+        setStatus(message)
+        return
+      }
+      if (event.data?.type === 'dsh-frontend-feedback-area-draft') {
+        setSelection(current => current?.kind === 'area' ? null : current)
+        const rect = event.data.rect
+        if (event.data.active && rect && typeof rect.width === 'number' && typeof rect.height === 'number') {
+          setStatus(`选区已保留（${Math.round(rect.width)} × ${Math.round(rect.height)}px）。可拖动蓝框或八个控制点继续调整，确认后才会采用坐标。`)
+        } else if (event.data.active) {
+          setStatus('正在创建选区；松开后选框会保留，可继续移动和缩放。')
+        } else {
+          setStatus('选区已取消，可重新拖动创建。')
+        }
+        return
+      }
+      if (event.data?.type !== 'dsh-frontend-feedback-selected' || !isFeedbackSelection(event.data.payload)) return
       setSelection(event.data.payload)
       setComment('')
-      setStatus(`已选择 ${event.data.payload.selector}`)
+      setStatus(event.data.payload.kind === 'area'
+        ? `已框选 ${event.data.payload.rect.width} × ${event.data.payload.rect.height}px 区域，并记录四个顶点。`
+        : `已选择 ${event.data.payload.selector}`)
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
@@ -198,10 +243,16 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
     navigatePreview(urlDraft)
   }
 
-  const setAnnotatorActive = (next: boolean) => {
+  const setAnnotatorMode = (next: SelectionMode | null) => {
+    setSelectionMode(next)
+    setStatus(next === 'area'
+      ? '在预览中拖动框选区域；黄色参考线表示对齐吸附。按住 Alt 自由框选，按住 Shift 锁定正方形。'
+      : next === 'element'
+        ? '在预览中悬停并点击已有 DOM 元素。'
+        : '已回到浏览模式，可点击页面链接和表单。')
     iframeRef.current?.contentWindow?.postMessage({
-      type: 'dsh-frontend-feedback-set-active',
-      active: next,
+      type: 'dsh-frontend-feedback-set-mode',
+      mode: next,
     }, '*')
   }
 
@@ -210,7 +261,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
     setQueued(items => [...items, commentFrom(selection, comment)])
     setSelection(null)
     setComment('')
-    setStatus('评注已加入队列，可继续选择其他元素。')
+    setStatus('评注已加入队列，可继续选择元素或框选区域。')
   }
 
   const sendAll = async () => {
@@ -242,7 +293,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
           <span style={styles.brandDot} />
           <div>
             <strong style={styles.title}>Frontend Feedback</strong>
-            <span style={styles.subtitle}>预览 · DOM 选择 · 精准微调</span>
+            <span style={styles.subtitle}>预览 · DOM 选择 · 区域框选 · 精准微调</span>
           </div>
         </div>
         <div style={styles.addressBar}>
@@ -272,11 +323,20 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
           />
           <button type="button" onClick={openPreview} style={styles.secondaryButton}>打开</button>
           <button type="button" aria-label="刷新" onClick={() => setRevision(value => value + 1)} style={styles.iconButton} title="刷新预览">↻</button>
-          <button
-            type="button"
-            onClick={() => setAnnotatorActive(!active)}
-            style={{ ...styles.modeButton, ...(active ? styles.modeButtonActive : {}) }}
-          >{active ? '结束评注' : '开始评注'}</button>
+          <div style={styles.modeGroup}>
+            <button
+              type="button"
+              title="点击已有 DOM 元素进行评注"
+              onClick={() => setAnnotatorMode(selectionMode === 'element' ? null : 'element')}
+              style={{ ...styles.modeButton, ...(selectionMode === 'element' ? styles.modeButtonActive : {}) }}
+            >选择元素</button>
+            <button
+              type="button"
+              title="拖动框选区域；Alt 关闭吸附，Shift 锁定正方形"
+              onClick={() => setAnnotatorMode(selectionMode === 'area' ? null : 'area')}
+              style={{ ...styles.modeButton, ...(selectionMode === 'area' ? styles.areaModeButtonActive : {}) }}
+            >框选区域</button>
+          </div>
           {onClose !== undefined ? (
             <button type="button" aria-label="关闭页面评注" title="关闭" onClick={onClose} style={styles.closeButton}>×</button>
           ) : null}
@@ -295,7 +355,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
               : 'allow-scripts allow-forms allow-modals allow-popups'}
             style={styles.iframe}
             onLoad={() => {
-              if (active) setAnnotatorActive(true)
+              if (selectionMode !== null) setAnnotatorMode(selectionMode)
             }}
           />
         </div>
@@ -306,15 +366,15 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
               <strong>评注队列</strong>
               <span style={styles.count}>{queued.length}</span>
             </div>
-            <span style={{ ...styles.statePill, ...(active ? styles.statePillActive : {}) }}>
-              {active ? '正在选择' : '浏览模式'}
+            <span style={{ ...styles.statePill, ...(selectionMode !== null ? styles.statePillActive : {}) }}>
+              {selectionMode === 'element' ? '元素选择' : selectionMode === 'area' ? '区域框选' : '浏览模式'}
             </span>
           </div>
 
           <div style={styles.sidebarScroller}>
             <div style={styles.scrollArea}>
               {queued.map((item, index) => (
-                <div key={`${item.selector}-${index}`} style={styles.commentCard}>
+                <div key={`${item.kind === 'area' ? `area-${item.rect.x}-${item.rect.y}` : item.selector}-${index}`} style={styles.commentCard}>
                   <div style={styles.cardIndex}>#{index + 1}</div>
                   <div style={styles.cardBody}>
                     <strong style={styles.cardTitle}>{cardTitle(item)}</strong>
@@ -332,7 +392,7 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
                 <div style={styles.emptyQueue}>
                   <span style={styles.emptyIcon}>⌁</span>
                   <strong>还没有评注</strong>
-                  <span>开启评注模式，悬停并点击页面中的元素。</span>
+                  <span>选择已有元素，或在空白位置拖动框选需要新增内容的区域。</span>
                 </div>
               ) : null}
             </div>
@@ -340,10 +400,12 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
             {selection !== null ? (
               <div style={styles.composer}>
                 <div style={styles.selectedMeta}>
-                  <span style={styles.tag}>{selection.tagName}</span>
-                  <code style={styles.selector}>{selection.selector}</code>
+                  <span style={{ ...styles.tag, ...(selection.kind === 'area' ? styles.areaTag : {}) }}>
+                    {selection.kind === 'area' ? 'AREA' : selection.tagName}
+                  </span>
+                  <code style={styles.selector}>{selectionCode(selection)}</code>
                 </div>
-                {selection.text ? <p style={styles.selectedText}>{selection.text}</p> : null}
+                {selectionSummary(selection) ? <p style={styles.selectedText}>{selectionSummary(selection)}</p> : null}
                 <textarea
                   autoFocus
                   value={comment}
@@ -351,7 +413,9 @@ export function FrontendFeedbackView({ sessionId, sendFeedback, hasSession, onCl
                   onKeyDown={event => {
                     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') queueCurrent()
                   }}
-                  placeholder="说明希望怎样修改这个元素…"
+                  placeholder={selection.kind === 'area'
+                    ? '说明希望在这个区域新增什么，例如“新增一个统计卡片，与左侧卡片顶边对齐”…'
+                    : '说明希望怎样修改这个元素…'}
                   style={styles.textarea}
                 />
                 <div style={styles.composerActions}>
@@ -467,8 +531,10 @@ const styles: Record<string, any> = {
   secondaryButton: { height: 36, padding: '0 14px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer' },
   iconButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontSize: 18 },
   iconButtonDisabled: { opacity: .35, cursor: 'not-allowed' },
+  modeGroup: { display: 'inline-flex', alignItems: 'center', gap: 5, padding: 3, border: `1px solid ${colors.border}`, borderRadius: 10, background: '#0a0f0d' },
   modeButton: { height: 36, padding: '0 15px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontWeight: 700 },
   modeButtonActive: { color: '#122217', borderColor: colors.accent, background: colors.accentStrong },
+  areaModeButtonActive: { color: '#111d34', borderColor: '#8eb6ff', background: '#b9d0ff' },
   closeButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#2a211f', cursor: 'pointer', fontSize: 22, lineHeight: 1 },
   workspace: {
     flex: 1,
@@ -501,6 +567,7 @@ const styles: Record<string, any> = {
   composer: { padding: 12, borderTop: `1px solid ${colors.border}`, background: colors.panel2 },
   selectedMeta: { display: 'flex', gap: 7, alignItems: 'center', minWidth: 0 },
   tag: { padding: '3px 6px', borderRadius: 5, color: '#112117', background: colors.accent, fontSize: 10, fontWeight: 800, textTransform: 'uppercase' },
+  areaTag: { color: '#111d34', background: '#b9d0ff' },
   selector: { minWidth: 0, overflow: 'hidden', color: colors.muted, fontSize: 10, textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   selectedText: { maxHeight: 42, overflow: 'hidden', margin: '9px 0', color: colors.muted, fontSize: 11, lineHeight: 1.45 },
   textarea: { width: '100%', minHeight: 84, resize: 'vertical', boxSizing: 'border-box', padding: 10, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#0c1210', font: '12px/1.5 inherit', outline: 'none' },
