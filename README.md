@@ -13,8 +13,6 @@ It connects the entire workflow—ask an Agent to create a page, preview it insi
 - Works like a mini browser with normal link navigation, GET search forms, back, forward, and refresh controls.
 - Saves the preview URL and the latest 50 history entries per session, then restores them after switching views or refreshing Harness.
 - Highlights and selects real DOM elements in annotation mode.
-- Draws persistent rectangular annotations where no DOM exists yet. The rectangle can be moved and resized from any edge or corner before confirmation, then returns raw and snapped viewport/page rectangles plus all four corners to the Agent.
-- Snaps area edges and centers to nearby DOM geometry, falls back to an 8 px grid, and records the suggested container and nearby elements for alignment-aware implementation.
 - Collects the page URL, CSS selector, DOM path, element text, and bounding rectangle automatically.
 - Organizes multiple annotations into a queue and sends them to the current Agent in one batch.
 - Bundles the `frontend-page-builder` Skill to guide the Agent through initial page creation and subsequent visual refinements.
@@ -79,12 +77,10 @@ Then refresh the Harness page. A local-path installation keeps a link to the plu
 1. Select a workspace, then use the composer-toolbar `Page Feedback` (`页面评注`) shortcut before or after asking the Agent to build and start a frontend page.
 2. Enter the page URL, for example `http://localhost:5173`.
 3. Select `Open` (`打开`) and confirm that the page appears in the central preview area.
-4. Choose `Select Element` (`选择元素`) to click existing DOM, or `Select Area` (`框选区域`) to drag a rectangle where new content should be added.
-5. After releasing the pointer, drag inside the retained blue rectangle to move it, or drag one of its eight edge/corner handles to resize it. Alignment guides remain available during adjustment.
-6. Hold `Alt` while drawing, moving, or resizing to disable snapping. Hold `Shift` while drawing or resizing a corner to keep a square. Select `Confirm Area` (`确认选区`) only when the placement is accurate.
-7. Describe the requested change in the right sidebar and add it to the feedback queue.
-8. Continue selecting elements or areas as needed, then select `Send to Agent` (`发送给 Agent`).
-9. After the Agent updates the source code, refresh the preview and continue with another feedback pass.
+4. Select `Start Annotation` (`开始评注`), then click the page element you want to change.
+5. Describe the requested change in the right sidebar and add it to the feedback queue.
+6. Continue selecting other elements as needed, then select `Send to Agent` (`发送给 Agent`).
+7. After the Agent updates the source code, refresh the preview and continue with another feedback pass.
 
 ## How it works
 
@@ -106,8 +102,8 @@ Current Agent ── load the frontend-page-builder Skill, locate source files, 
 
 The plugin consists of three parts:
 
-1. **Client view**: registers a `conversation.view` containing the address bar, iframe, DOM/area selectors, and feedback queue.
-2. **Host preview route**: fetches the target HTML, inserts a `<base>` element and the annotation script, then returns it to a controlled iframe. The script handles DOM hit testing, persistent move/resize rectangles, alignment snapping, four-corner extraction, links, and GET forms through `postMessage`.
+1. **Client view**: registers a `conversation.view` containing the address bar, iframe, DOM selector, and feedback queue.
+2. **Host preview route**: fetches the target HTML, inserts a `<base>` element and the annotation script, then returns it to a controlled iframe. Links and GET forms are passed back to the plugin through `postMessage`, so subsequent pages are still loaded through the preview route and remain annotatable.
 3. **Frontend Builder Skill**: turns structured `[frontend-feedback]` data into a source-editing, verification, and refresh workflow.
 
 Feedback sent to the Agent contains evidence like this:
@@ -161,5 +157,5 @@ npm run check
 - Drag-select empty areas and send four corner points, normalized coordinates, the nearest container, and a screenshot to the Agent.
 - Add new components where no existing DOM element is available.
 - Generate interactive HTML/CSS/JavaScript slide decks and annotate individual slides.
-- Delete or duplicate selections, multi-select regions, and annotate responsive breakpoints.
+- Move, resize, delete, multi-select, and annotate responsive breakpoints.
 - Compare before-and-after visuals and retain annotation history.
