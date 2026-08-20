@@ -8,7 +8,7 @@ It connects the entire workflow—ask an Agent to create a page, preview it insi
 
 ## Features
 
-- Registers a dedicated `Page Feedback` (`页面评注`) view at the top of each conversation.
+- Adds an always-visible `Page Feedback` (`页面评注`) shortcut to the composer toolbar, including blank conversations, and keeps the dedicated conversation view after the first message.
 - Previews local development pages and permitted remote pages directly inside Harness.
 - Works like a mini browser with normal link navigation, GET search forms, back, forward, and refresh controls.
 - Saves the preview URL and the latest 50 history entries per session, then restores them after switching views or refreshing Harness.
@@ -17,6 +17,7 @@ It connects the entire workflow—ask an Agent to create a page, preview it insi
 - Organizes multiple annotations into a queue and sends them to the current Agent in one batch.
 - Bundles the `frontend-page-builder` Skill to guide the Agent through initial page creation and subsequent visual refinements.
 - Avoids the Harness task bar and composer automatically; both the preview and feedback queue remain independently scrollable.
+- Can be opened before the first message; after a workspace has been selected, the shortcut appears beside the `+` control in the composer toolbar.
 
 ## Screenshots
 
@@ -41,7 +42,7 @@ pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft
 pnpm dsh web
 ```
 
-Open the Harness URL printed in the terminal and enter any conversation. A `Page Feedback` (`页面评注`) tab will appear at the top.
+Open the Harness URL printed in the terminal and select a workspace. The `Page Feedback` (`页面评注`) shortcut appears beside the `+` control even before the first message. Select it to open the annotation panel. After the conversation has content, the same feature is also available as a view tab at the top.
 
 That is all you need for normal use. The repository includes the compiled `lib/` output, so plugins installed from GitHub do not need a separate build step.
 
@@ -59,7 +60,7 @@ npm run build
 Return to the DeepSeek Harness source directory and link the plugin into the `web` profile:
 
 ```powershell
-pnpm dsh plugin --profile web add D:\path\to\dsh-PageCraft
+pnpm dsh plugin --profile web add <path-to-your-local-dsh-PageCraft-clone>
 pnpm dsh web
 ```
 
@@ -73,8 +74,8 @@ Then refresh the Harness page. A local-path installation keeps a link to the plu
 
 ## Usage
 
-1. Ask the Agent in a normal conversation to build and start a frontend page.
-2. Open `Page Feedback` (`页面评注`) and enter the page URL, for example `http://localhost:5173`.
+1. Select a workspace, then use the composer-toolbar `Page Feedback` (`页面评注`) shortcut before or after asking the Agent to build and start a frontend page.
+2. Enter the page URL, for example `http://localhost:5173`.
 3. Select `Open` (`打开`) and confirm that the page appears in the central preview area.
 4. Select `Start Annotation` (`开始评注`), then click the page element you want to change.
 5. Describe the requested change in the right sidebar and add it to the feedback queue.
