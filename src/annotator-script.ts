@@ -7,6 +7,9 @@ export const ANNOTATOR_SCRIPT = String.raw`
   const SNAP_THRESHOLD = 8;
   const GRID_SIZE = 8;
   const MIN_AREA_SIZE = 8;
+  const MAX_ELEMENT_HTML = 1600;
+  const MAX_CONTAINER_HTML = 2400;
+  const MAX_REFERENCE_HTML = 900;
 
   function ui(tag, name, css) {
     const node = document.createElement(tag);
@@ -51,25 +54,12 @@ export const ANNOTATOR_SCRIPT = String.raw`
     node.style.cssText = 'position:absolute;z-index:2;width:11px;height:11px;border:2px solid #4f82d3;border-radius:3px;background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.3);transform:translate(-50%,-50%);touch-action:none;' + position;
     areaOverlay.appendChild(node);
   }
-  const button = ui('button', 'toggle', 'position:fixed;right:22px;bottom:22px;z-index:2147483647;width:66px;height:66px;border:1px solid rgba(255,255,255,.5);border-radius:999px;background:linear-gradient(145deg,#dff3e4,#6f9c79);color:#17351f;box-shadow:0 14px 36px rgba(25,61,35,.3);font:700 13px/1.15 system-ui,sans-serif;white-space:pre-line;cursor:grab;user-select:none;touch-action:none');
-  button.type = 'button';
-
   let mode = null;
-  let preferredMode = 'element';
-  let buttonPointerId = null;
-  let buttonStartX = 0;
-  let buttonStartY = 0;
-  let buttonOriginLeft = 0;
-  let buttonOriginTop = 0;
-  let buttonMoved = false;
   let areaPointerId = null;
-  let drawing = false;
   let rawStart = null;
   let snappedStart = null;
   let startGuides = [];
   let currentRaw = null;
-  let currentSnapped = null;
-  let currentGuides = [];
   let referenceElements = [];
   let referenceCandidates = { x: [], y: [] };
   let previousUserSelect = '';
@@ -84,7 +74,6 @@ export const ANNOTATOR_SCRIPT = String.raw`
   const isUi = (node) => node instanceof Element && Boolean(node.closest('[data-dsh-annotator-ui]'));
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const round = (value) => Math.round(value);
-  const round4 = (value) => Math.round(value * 10000) / 10000;
   const post = (message) => window.parent.postMessage(message, '*');
   const consume = (event) => {
     event.preventDefault();
@@ -111,6 +100,128 @@ export const ANNOTATOR_SCRIPT = String.raw`
     return parts.join(' > ');
   }
 
+  function htmlSnippet(element, maxLength) {
+    if (!(element instanceof Element)) return '';
+    const clone = element.cloneNode(true);
+    if (!(clone instanceof Element)) return '';
+    for (const node of [clone, ...clone.querySelectorAll('*')]) {
+      if (node.matches('script, style, noscript, template, [data-dsh-annotator-ui]')) {
+        if (node !== clone) node.remove();
+        continue;
+      }
+      for (const attribute of Array.from(node.attributes)) {
+        const name = attribute.name.toLowerCase();
+        if (name.startsWith('on') || name === 'srcdoc' || name === 'nonce' || name === 'integrity') {
+          node.removeAttribute(attribute.name);
+        }
+      }
+      if (node instanceof HTMLInputElement) node.removeAttribute('value');
+      if (node instanceof HTMLTextAreaElement) node.textContent = '';
+      const src = node.getAttribute('src');
+      if (src && (src.startsWith('data:') || src.startsWith('blob:'))) node.setAttribute('src', '[embedded-resource]');
+    }
+    return clone.outerHTML.trim().replace(/\s+/g, ' ').slice(0, maxLength);
+  }
+
+  function domSnapshot(element, maxLength) {
+    return {
+      tagName: element.localName,
+      selector: selectorFor(element),
+      html: htmlSnippet(element, maxLength)
+    };
+  }
+
+  function containerForElement(element) {
+    let current = element.parentElement;
+    const semanticContainers = new Set(['main', 'section', 'article', 'form', 'nav', 'header', 'footer', 'aside']);
+    while (current && current !== document.body) {
+      const display = getComputedStyle(current).display;
+      if (semanticContainers.has(current.localName) || current.id || current.classList.length > 0 || display === 'flex' || display === 'grid') {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return document.body || element.parentElement || element;
+  }
+
+  function presentationSlides() {
+    return Array.from(document.querySelectorAll('[data-pagecraft-slide-id]'))
+      .filter((element) => element instanceof HTMLElement && !isUi(element))
+      .slice(0, 100);
+  }
+
+  function presentationSlideTitle(element, index) {
+    const explicit = element.getAttribute('data-pagecraft-slide-title') || element.getAttribute('aria-label');
+    if (explicit && explicit.trim()) return explicit.trim().slice(0, 120);
+    const heading = element.querySelector('h1, h2, h3, [data-pagecraft-slide-heading]');
+    const text = heading && (heading.innerText || heading.textContent || '').trim();
+    return text ? text.replace(/\s+/g, ' ').slice(0, 120) : '幻灯片 ' + (index + 1);
+  }
+
+  function presentationContextFor(element) {
+    if (!(element instanceof Element)) return null;
+    const slide = element.closest('[data-pagecraft-slide-id]');
+    if (!(slide instanceof HTMLElement)) return null;
+    const slides = presentationSlides();
+    const index = slides.indexOf(slide);
+    const slideId = slide.getAttribute('data-pagecraft-slide-id');
+    if (!slideId || index < 0) return null;
+    return {
+      slideId,
+      slideTitle: presentationSlideTitle(slide, index),
+      slideIndex: index
+    };
+  }
+
+  function areaPresentationContext(bounds) {
+    const x = clamp(bounds.x + bounds.width / 2, 0, innerWidth - 1);
+    const y = clamp(bounds.y + bounds.height / 2, 0, innerHeight - 1);
+    const target = document.elementsFromPoint(x, y).find((element) => !isUi(element));
+    return presentationContextFor(target);
+  }
+
+  let lastDeckSignature = '';
+  let deckNotifyFrame = null;
+
+  function notifyDeckState(force = false) {
+    const elements = presentationSlides();
+    const slides = elements.map((element, index) => ({
+      id: element.getAttribute('data-pagecraft-slide-id'),
+      title: presentationSlideTitle(element, index),
+      index
+    })).filter((slide) => Boolean(slide.id));
+    let activeSlideId = null;
+    let closestDistance = Infinity;
+    for (const element of elements) {
+      const bounds = element.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) continue;
+      const distance = Math.abs(bounds.top + bounds.height / 2 - innerHeight / 2);
+      if (distance >= closestDistance) continue;
+      closestDistance = distance;
+      activeSlideId = element.getAttribute('data-pagecraft-slide-id');
+    }
+    const signature = JSON.stringify({ slides, activeSlideId });
+    if (!force && signature === lastDeckSignature) return;
+    lastDeckSignature = signature;
+    post({ type: 'dsh-frontend-feedback-deck-state', slides, activeSlideId });
+  }
+
+  function scheduleDeckState(force = false) {
+    if (deckNotifyFrame !== null) cancelAnimationFrame(deckNotifyFrame);
+    deckNotifyFrame = requestAnimationFrame(() => {
+      deckNotifyFrame = null;
+      notifyDeckState(force);
+    });
+  }
+
+  function selectPresentationSlide(slideId) {
+    const slide = presentationSlides().find((element) => element.getAttribute('data-pagecraft-slide-id') === slideId);
+    if (!slide) return;
+    window.dispatchEvent(new CustomEvent('pagecraft:select-slide', { detail: { slideId } }));
+    slide.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    scheduleDeckState(true);
+  }
+
   function describeElement(element) {
     const bounds = element.getBoundingClientRect();
     const path = [];
@@ -119,6 +230,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
       path.unshift(current.localName);
       current = current.parentElement;
     }
+    const presentation = presentationContextFor(element);
     return {
       kind: 'element',
       url: document.baseURI,
@@ -126,12 +238,15 @@ export const ANNOTATOR_SCRIPT = String.raw`
       selector: selectorFor(element),
       domPath: path.join(' > '),
       text: (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 240),
+      html: htmlSnippet(element, MAX_ELEMENT_HTML),
+      container: domSnapshot(containerForElement(element), MAX_CONTAINER_HTML),
       rect: {
         x: round(bounds.x),
         y: round(bounds.y),
         width: round(bounds.width),
         height: round(bounds.height)
-      }
+      },
+      ...(presentation ? { presentation } : {})
     };
   }
 
@@ -141,12 +256,6 @@ export const ANNOTATOR_SCRIPT = String.raw`
   }
 
   function renderState() {
-    const active = mode !== null;
-    button.textContent = mode === 'area' ? '结束\n框选' : mode === 'element' ? '结束\n元素' : '页面\n评注';
-    button.style.background = active
-      ? mode === 'area' ? 'linear-gradient(145deg,#d7e6ff,#5e8bd6)' : 'linear-gradient(145deg,#c8ecd2,#438a59)'
-      : 'linear-gradient(145deg,#dff3e4,#6f9c79)';
-    button.setAttribute('aria-label', active ? '结束' + (mode === 'area' ? '区域框选' : '元素评注') : '开启页面评注');
     areaCapture.style.display = mode === 'area' ? 'block' : 'none';
     if (mode !== 'element') elementOverlay.style.display = 'none';
     if (mode !== 'area') {
@@ -163,10 +272,8 @@ export const ANNOTATOR_SCRIPT = String.raw`
   function setMode(next) {
     const normalized = next === 'element' || next === 'area' ? next : null;
     mode = normalized;
-    if (normalized !== null) preferredMode = normalized;
     root.setAttribute('data-dsh-annotator-mode', normalized || 'browse');
     renderState();
-    post({ type: 'dsh-frontend-feedback-active', active: normalized !== null, mode: normalized });
   }
 
   function requestNavigation(url) {
@@ -192,14 +299,13 @@ export const ANNOTATOR_SCRIPT = String.raw`
 
   function visibleReferenceElements() {
     const result = [];
-    const all = document.body ? document.body.querySelectorAll('*') : [];
-    for (const element of all) {
-      if (!(element instanceof HTMLElement) || isUi(element)) continue;
+    function collect(element) {
+      if (!(element instanceof HTMLElement) || isUi(element)) return;
       const style = getComputedStyle(element);
-      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) continue;
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return;
       const bounds = element.getBoundingClientRect();
-      if (bounds.width < 2 || bounds.height < 2) continue;
-      if (bounds.right < 0 || bounds.bottom < 0 || bounds.left > innerWidth || bounds.top > innerHeight) continue;
+      if (bounds.width < 2 || bounds.height < 2) return;
+      if (bounds.right < 0 || bounds.bottom < 0 || bounds.left > innerWidth || bounds.top > innerHeight) return;
       result.push({
         element,
         selector: selectorFor(element),
@@ -212,6 +318,11 @@ export const ANNOTATOR_SCRIPT = String.raw`
           height: bounds.height
         }
       });
+    }
+    if (document.body) collect(document.body);
+    const all = document.body ? document.body.querySelectorAll('*') : [];
+    for (const element of all) {
+      collect(element);
       if (result.length >= 800) break;
     }
     return result;
@@ -280,15 +391,6 @@ export const ANNOTATOR_SCRIPT = String.raw`
       y: Math.min(a.y, b.y),
       width: Math.abs(b.x - a.x),
       height: Math.abs(b.y - a.y)
-    };
-  }
-
-  function corners(bounds) {
-    return {
-      topLeft: { x: round(bounds.x), y: round(bounds.y) },
-      topRight: { x: round(bounds.x + bounds.width), y: round(bounds.y) },
-      bottomRight: { x: round(bounds.x + bounds.width), y: round(bounds.y + bounds.height) },
-      bottomLeft: { x: round(bounds.x), y: round(bounds.y + bounds.height) }
     };
   }
 
@@ -365,14 +467,14 @@ export const ANNOTATOR_SCRIPT = String.raw`
   }
 
   function updateAreaDrawing(event) {
-    if (!drawing || rawStart === null || snappedStart === null) return null;
+    if (areaInteraction !== 'draw' || rawStart === null || snappedStart === null) return null;
     currentRaw = {
       x: clamp(event.clientX, 0, innerWidth),
       y: clamp(event.clientY, 0, innerHeight)
     };
     const snapped = snapPoint(currentRaw, referenceCandidates, !event.altKey);
-    currentSnapped = event.shiftKey ? squaredPoint(snappedStart, snapped.point) : snapped.point;
-    currentGuides = event.shiftKey ? [] : snapped.guides;
+    const currentSnapped = event.shiftKey ? squaredPoint(snappedStart, snapped.point) : snapped.point;
+    const currentGuides = event.shiftKey ? [] : snapped.guides;
     const guides = uniqueGuides([...startGuides, ...currentGuides]);
     const bounds = rectangle(snappedStart, currentSnapped);
     renderArea(bounds, guides, !event.altKey);
@@ -540,6 +642,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
     return {
       tagName: item.element.localName,
       selector: item.selector,
+      html: htmlSnippet(item.element, relation === 'container' ? MAX_CONTAINER_HTML : MAX_REFERENCE_HTML),
       relation,
       rect: {
         x: round(item.rect.left),
@@ -586,24 +689,15 @@ export const ANNOTATOR_SCRIPT = String.raw`
   function describeArea(rawBounds, bounds, guides) {
     const roundedRaw = roundedRect(rawBounds);
     const rounded = roundedRect(bounds);
-    const pageRect = {
-      x: rounded.x + round(scrollX),
-      y: rounded.y + round(scrollY),
-      width: rounded.width,
-      height: rounded.height
-    };
     const references = areaReferences(bounds);
     const finalGuides = uniqueGuides(guides);
+    const presentation = areaPresentationContext(bounds);
     return {
       kind: 'area',
       url: document.baseURI,
       coordinateSpace: 'viewport',
       rawRect: roundedRaw,
       rect: rounded,
-      pageRect,
-      rawCorners: corners(roundedRaw),
-      corners: corners(rounded),
-      pageCorners: corners(pageRect),
       viewport: {
         width: round(innerWidth),
         height: round(innerHeight),
@@ -611,32 +705,23 @@ export const ANNOTATOR_SCRIPT = String.raw`
         scrollY: round(scrollY),
         devicePixelRatio: devicePixelRatio || 1
       },
-      normalized: {
-        left: round4(rounded.x / Math.max(1, innerWidth)),
-        top: round4(rounded.y / Math.max(1, innerHeight)),
-        width: round4(rounded.width / Math.max(1, innerWidth)),
-        height: round4(rounded.height / Math.max(1, innerHeight))
-      },
       alignment: {
-        snapped: finalGuides.length > 0,
         threshold: SNAP_THRESHOLD,
         guides: finalGuides
       },
       ...(references.container ? { container: references.container } : {}),
-      nearby: references.nearby
+      nearby: references.nearby,
+      ...(presentation ? { presentation } : {})
     };
   }
 
   function cancelAreaInteraction() {
-    drawing = false;
     areaInteraction = null;
     areaPointerId = null;
     rawStart = null;
     snappedStart = null;
     startGuides = [];
     currentRaw = null;
-    currentSnapped = null;
-    currentGuides = [];
     interactionStartPoint = null;
     interactionStartBounds = null;
     resizeHandle = null;
@@ -691,9 +776,8 @@ export const ANNOTATOR_SCRIPT = String.raw`
       const result = updateAreaDrawing(event);
       const rawEnd = currentRaw;
       const rawOrigin = rawStart;
-      const snappedOrigin = snappedStart;
       cancelAreaInteraction();
-      if (result === null || rawEnd === null || rawOrigin === null || snappedOrigin === null || result.bounds.width < MIN_AREA_SIZE || result.bounds.height < MIN_AREA_SIZE) {
+      if (result === null || rawEnd === null || rawOrigin === null || result.bounds.width < MIN_AREA_SIZE || result.bounds.height < MIN_AREA_SIZE) {
         clearAreaDraft();
         post({ type: 'dsh-frontend-feedback-selection-error', message: '框选区域太小，请拖出至少 8 × 8 px 的区域。' });
         return;
@@ -711,8 +795,27 @@ export const ANNOTATOR_SCRIPT = String.raw`
   }
 
   window.addEventListener('message', (event) => {
-    if (event.data?.type === 'dsh-frontend-feedback-set-mode') setMode(event.data.mode);
-    if (event.data?.type === 'dsh-frontend-feedback-set-active') setMode(event.data.active ? preferredMode : null);
+    if (event.data?.type === 'dsh-frontend-feedback-set-mode') {
+      setMode(event.data.mode);
+      return;
+    }
+    if (event.data?.type === 'dsh-frontend-feedback-clear-area') {
+      clearAreaDraft(false);
+      return;
+    }
+    if (event.data?.type === 'dsh-frontend-feedback-restore-area') {
+      const rect = event.data.rect;
+      if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return;
+      const restored = clampBounds(rect);
+      draftRawBounds = { ...restored };
+      draftBounds = { ...restored };
+      draftGuides = [];
+      setMode('area');
+      renderArea(draftBounds, draftGuides, false, true);
+      return;
+    }
+    if (event.data?.type === 'dsh-frontend-feedback-request-deck-state') notifyDeckState(true);
+    if (event.data?.type === 'dsh-frontend-feedback-select-slide' && typeof event.data.slideId === 'string') selectPresentationSlide(event.data.slideId);
   });
 
   document.addEventListener('mouseover', (event) => highlight(event.target), true);
@@ -778,7 +881,6 @@ export const ANNOTATOR_SCRIPT = String.raw`
     clearAreaDraft(false);
     areaInteraction = 'draw';
     areaPointerId = event.pointerId;
-    drawing = true;
     referenceElements = visibleReferenceElements();
     referenceCandidates = alignmentCandidates(referenceElements);
     rawStart = { x: clamp(event.clientX, 0, innerWidth), y: clamp(event.clientY, 0, innerHeight) };
@@ -786,8 +888,6 @@ export const ANNOTATOR_SCRIPT = String.raw`
     snappedStart = snapped.point;
     startGuides = snapped.guides;
     currentRaw = rawStart;
-    currentSnapped = snappedStart;
-    currentGuides = [];
     previousUserSelect = document.body ? document.body.style.userSelect : '';
     if (document.body) document.body.style.userSelect = 'none';
     renderArea(rectangle(snappedStart, snappedStart), startGuides, !event.altKey);
@@ -832,49 +932,18 @@ export const ANNOTATOR_SCRIPT = String.raw`
     clearAreaDraft();
   });
 
-  button.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) return;
-    buttonPointerId = event.pointerId;
-    buttonStartX = event.clientX;
-    buttonStartY = event.clientY;
-    const bounds = button.getBoundingClientRect();
-    buttonOriginLeft = bounds.left;
-    buttonOriginTop = bounds.top;
-    buttonMoved = false;
-    button.setPointerCapture(buttonPointerId);
-    button.style.cursor = 'grabbing';
-    consume(event);
+  const deckObserver = new MutationObserver(() => scheduleDeckState());
+  deckObserver.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['data-pagecraft-slide-id', 'data-pagecraft-slide-title']
   });
-
-  button.addEventListener('pointermove', (event) => {
-    if (buttonPointerId !== event.pointerId) return;
-    const dx = event.clientX - buttonStartX;
-    const dy = event.clientY - buttonStartY;
-    if (Math.abs(dx) + Math.abs(dy) > 4) buttonMoved = true;
-    if (!buttonMoved) return;
-    button.style.right = 'auto';
-    button.style.bottom = 'auto';
-    button.style.left = clamp(buttonOriginLeft + dx, 8, Math.max(8, innerWidth - button.offsetWidth - 8)) + 'px';
-    button.style.top = clamp(buttonOriginTop + dy, 8, Math.max(8, innerHeight - button.offsetHeight - 8)) + 'px';
-  });
-
-  button.addEventListener('pointerup', (event) => {
-    if (buttonPointerId !== event.pointerId) return;
-    button.releasePointerCapture(buttonPointerId);
-    buttonPointerId = null;
-    button.style.cursor = 'grab';
-    consume(event);
-    if (!buttonMoved) setMode(mode === null ? preferredMode : null);
-  });
-
-  button.addEventListener('pointercancel', () => {
-    buttonPointerId = null;
-    buttonMoved = false;
-    button.style.cursor = 'grab';
-  });
-  button.addEventListener('click', (event) => consume(event));
+  document.addEventListener('scroll', () => scheduleDeckState(), true);
+  window.addEventListener('resize', () => scheduleDeckState());
 
   renderState();
+  scheduleDeckState(true);
   post({ type: 'dsh-frontend-feedback-ready', url: document.baseURI, modes: ['element', 'area'] });
 })();
 `

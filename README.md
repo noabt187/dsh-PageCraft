@@ -1,161 +1,172 @@
-# dsh-PageCraft
+# PageCraft
 
-**English** | [简体中文](./README.zh-CN.md)
+**English** · [简体中文](./README.zh-CN.md)
 
-A frontend building and visual annotation plugin for DeepSeek Harness Web.
+Visual feedback for frontend agents, built into DeepSeek Harness.
 
-It connects the entire workflow—ask an Agent to create a page, preview it inside Harness, click real DOM elements to leave feedback, and let the Agent update the source code—without switching between a browser, screenshot tools, and a chat window.
+PageCraft brings a Codex-style visual annotation loop to DeepSeek Harness: open a page, point at what should change, and send precise feedback to the Agent that owns the code. It extends that workflow with editable free-form regions, multi-item feedback queues, draft recovery, a mini browser, and browser-based presentation support.
 
-## Features
+> PageCraft is an independent project. It is not affiliated with or endorsed by OpenAI or Codex.
 
-- Adds an always-visible `Page Feedback` (`页面评注`) shortcut to the composer toolbar, including blank conversations, and keeps the dedicated conversation view after the first message.
-- Previews local development pages and permitted remote pages directly inside Harness.
-- Works like a mini browser with normal link navigation, GET search forms, back, forward, and refresh controls.
-- Saves the preview URL and the latest 50 history entries per session, then restores them after switching views or refreshing Harness.
-- Highlights and selects real DOM elements in annotation mode.
-- Collects the page URL, CSS selector, DOM path, element text, and bounding rectangle automatically.
-- Organizes multiple annotations into a queue and sends them to the current Agent in one batch.
-- Bundles the `frontend-page-builder` Skill to guide the Agent through initial page creation and subsequent visual refinements.
-- Avoids the Harness task bar and composer automatically; both the preview and feedback queue remain independently scrollable.
-- Can be opened before the first message; after a workspace has been selected, the shortcut appears beside the `+` control in the composer toolbar.
+![PageCraft overview](docs/screenshots/overview.png)
 
-## Screenshots
+## Why PageCraft?
 
-### Page feedback overview
+Frontend feedback loses information when it becomes a screenshot and a sentence like “move that card a little lower.” The Agent still has to guess the element, its container, the intended layout behavior, and the exact location.
 
-![dsh-PageCraft page feedback overview](docs/screenshots/overview.png)
+PageCraft keeps that context attached to the feedback. It captures the selected DOM, its surrounding container, or an adjustable region with container-relative geometry, then sends a compact structured work order to the current Agent.
 
-### DOM element selection
+## Highlights
 
-![dsh-PageCraft DOM element selection](docs/screenshots/element-selection.png)
+- **Point at real UI** — select rendered DOM elements instead of describing them from memory.
+- **Draw what does not exist yet** — create, move, resize, and align a region where a new component should be added.
+- **Refine pages and presentations** — use the same annotation workflow for normal web pages and interactive HTML/React slide decks.
+- **Stay in the loop** — navigate with back, forward, and refresh; drafts and queues survive panel reloads and Harness restarts.
+- **Send implementation-ready context** — batch multiple comments into structured JSON with DOM evidence, layout intent, slide identity, and precomputed geometry.
+- **Build with dedicated Skills** — `frontend-page-builder` and `presentation-builder` keep page and deck generation rules separate from the annotation engine.
 
-### Multi-item feedback queue
-
-![dsh-PageCraft feedback queue](docs/screenshots/feedback-queue.png)
+| DOM selection | Adjustable regions | Feedback queue |
+| --- | --- | --- |
+| ![DOM selection](docs/screenshots/element-selection.png) | Draw, move, resize, and snap regions where no DOM exists yet. | ![Feedback queue](docs/screenshots/feedback-queue.png) |
 
 ## Quick start
 
-If you already have the DeepSeek Harness source code, run the following commands from its repository root:
+From the DeepSeek Harness source directory:
 
 ```powershell
 pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft
 pnpm dsh web
 ```
 
-Open the Harness URL printed in the terminal and select a workspace. The `Page Feedback` (`页面评注`) shortcut appears beside the `+` control even before the first message. Select it to open the annotation panel. After the conversation has content, the same feature is also available as a view tab at the top.
+Open the Harness URL printed in the terminal, select a workspace, and choose **PageCraft** beside the composer controls. The repository includes compiled `lib/` output, so a GitHub installation does not require a separate plugin build.
 
-That is all you need for normal use. The repository includes the compiled `lib/` output, so plugins installed from GitHub do not need a separate build step.
+## Use PageCraft
 
-## Local development installation
+### Refine a web page
 
-To modify this plugin and let Harness read your local source directly:
+1. Start the frontend project and open its local URL in PageCraft, for example `http://localhost:5173`.
+2. Choose **Select element** for existing UI or **Select area** for a component that does not exist yet.
+3. Write one or more comments, add them to the queue, and select **Send to Agent**.
+4. PageCraft reloads the preview when the Agent finishes while preserving any unsent work.
 
-```powershell
-git clone https://github.com/noabt187/dsh-PageCraft.git
-cd dsh-PageCraft
-npm install
-npm run build
+Area annotations support three explicit layout intents:
+
+- **Insert** — add content to normal layout flow and move following content.
+- **Overlay** — place content above the current layout without reflowing it.
+- **Replace** — replace the DOM currently covered by the selected region.
+
+### Build and refine a presentation
+
+1. Switch PageCraft to **Presentation** and choose **New presentation**.
+2. Provide the title, audience, goal, slide count, visual style, and color mode.
+3. The Agent uses the bundled `presentation-builder` Skill to create a browser-based deck.
+4. Open the reported preview URL. PageCraft discovers the slides and lets you annotate each one by element or region.
+
+New decks default to a light visual system unless you explicitly choose an inherited or dark theme. The current presentation workflow targets interactive HTML/React decks; PPTX/PDF export is not implemented yet.
+
+## What the Agent receives
+
+PageCraft sends concise work orders rather than screenshots alone. A region request can look like this:
+
+```json
+{
+  "annotations": [
+    {
+      "id": 1,
+      "type": "area",
+      "operation": "insert",
+      "target": {
+        "container": { "selector": ".dashboard" },
+        "position": {
+          "x": 24,
+          "y": 320,
+          "width": 720,
+          "height": 180,
+          "corners": {
+            "topLeft": [24, 320],
+            "topRight": [744, 320],
+            "bottomRight": [744, 500],
+            "bottomLeft": [24, 500]
+          }
+        }
+      },
+      "request": "Add a statistics card here and keep it aligned with the cards above."
+    }
+  ]
+}
 ```
 
-Return to the DeepSeek Harness source directory and link the plugin into the `web` profile:
-
-```powershell
-pnpm dsh plugin --profile web add <path-to-your-local-dsh-PageCraft-clone>
-pnpm dsh web
-```
-
-After changing the plugin, run:
-
-```powershell
-npm run build
-```
-
-Then refresh the Harness page. A local-path installation keeps a link to the plugin directory, so you normally do not need to reinstall it after every change.
-
-## Usage
-
-1. Select a workspace, then use the composer-toolbar `Page Feedback` (`页面评注`) shortcut before or after asking the Agent to build and start a frontend page.
-2. Enter the page URL, for example `http://localhost:5173`.
-3. Select `Open` (`打开`) and confirm that the page appears in the central preview area.
-4. Select `Start Annotation` (`开始评注`), then click the page element you want to change.
-5. Describe the requested change in the right sidebar and add it to the feedback queue.
-6. Continue selecting other elements as needed, then select `Send to Agent` (`发送给 Agent`).
-7. After the Agent updates the source code, refresh the preview and continue with another feedback pass.
+The plugin performs the rectangle and container-offset calculations before the request reaches the model. The Agent can spend its reasoning on the source change and layout, not on reconstructing coordinates.
 
 ## How it works
 
 ```text
 Target page
-   │
-   ▼
-Harness Host preview route ── fetch HTML, preserve the resource base, inject the annotator
-   │
-   ▼
-Sandboxed iframe ── hover highlight, DOM selection, collect selector/path/rect
-   │ postMessage
-   ▼
-Page Feedback view ── edit and organize the feedback queue
-   │ session.prompt(..., "queue")
-   ▼
-Current Agent ── load the frontend-page-builder Skill, locate source files, apply changes
+    │
+    ▼
+Harness preview proxy ── loads HTML and runtime resources
+    │
+    ▼
+Isolated preview ── DOM selection, region editing, slide discovery
+    │ structured feedback
+    ▼
+Current Agent + matching builder Skill
+    │
+    └──────────────► source update ► preview refresh
 ```
 
-The plugin consists of three parts:
+PageCraft has three main layers:
 
-1. **Client view**: registers a `conversation.view` containing the address bar, iframe, DOM selector, and feedback queue.
-2. **Host preview route**: fetches the target HTML, inserts a `<base>` element and the annotation script, then returns it to a controlled iframe. Links and GET forms are passed back to the plugin through `postMessage`, so subsequent pages are still loaded through the preview route and remain annotatable.
-3. **Frontend Builder Skill**: turns structured `[frontend-feedback]` data into a source-editing, verification, and refresh workflow.
-
-Feedback sent to the Agent contains evidence like this:
-
-```text
-Page URL: http://localhost:5173/
-CSS selector: #hero-title
-DOM path: html > body > main > section > h1
-Element text: Build faster
-Bounding rectangle: x=120, y=84, width=420, height=72
-Requested change: Make the title more prominent and add a product description below it
-```
-
-Coordinates provide visual context. The Agent still prioritizes the existing React, Vue, HTML, and CSS source structure instead of mechanically adding absolute-positioned styles.
+1. **Preview** — a small browser inside Harness with navigation and a host-side proxy for local or permitted remote pages.
+2. **Annotation** — an injected script for DOM hit testing, adjustable rectangles, alignment guides, container discovery, and slide metadata.
+3. **Agent handoff** — a queue that turns visual feedback into `[frontend-feedback]` or `[presentation-feedback]` work orders.
 
 ## Configuration
 
-By default, the plugin can proxy HTTP and HTTPS pages, with a 5 MiB HTML limit and a 15-second request timeout. You can adjust these values in the Harness profile:
+Localhost pages are always supported. Remote hosts can be enabled globally or allowed individually in the Harness profile:
 
 ```yaml
 - id: frontend-feedback
   name: dsh-frontend-feedback
   config:
-    allowRemoteHosts: true
+    allowRemoteHosts: false
     allowedHosts:
-      - preview.internal.example
+      - preview.example.com
     maxHtmlBytes: 5242880
+    maxResourceBytes: 20971520
     requestTimeoutMs: 15000
 ```
 
-If you only annotate local pages, set `allowRemoteHosts` to `false` and use `allowedHosts` to permit individual additional hosts.
+Only preview hosts you trust. PageCraft executes target-page JavaScript inside an isolated iframe, but it is still designed primarily for local development and pages you control.
 
-## Development and verification
+## Local development
 
 ```powershell
+git clone https://github.com/noabt187/dsh-PageCraft.git
+cd dsh-PageCraft
 npm install
 npm run check
 ```
 
-`npm run check` runs the build, automated tests, and npm package-content validation in sequence. Compiled output is written to `lib/`.
+Link the local directory from the DeepSeek Harness source tree:
 
-## Known limitations
+```powershell
+pnpm dsh plugin --profile web add <path-to-dsh-PageCraft>
+pnpm dsh web
+```
 
-- The plugin proxies the HTML entry document, not the entire website. Sites that rely on target-domain cookies, Service Workers, strict CSP policies, or special cross-origin ES modules may not work completely.
-- Some APIs and assets on remote sites may still be restricted by browser CORS policies.
-- The mini browser supports normal HTTP/HTTPS links and GET forms. POST login, file uploads, `window.open`, Service Workers, and scripts that directly modify `location` are not proxied yet.
-- DeepSeek Harness is still in developer preview. Run `npm run check` again after upgrading Harness.
+Run `npm run build` after source changes and refresh Harness. `npm run check` builds the plugin, runs the test suite, and validates the package contents.
+
+## Limitations
+
+- PageCraft works best with local development servers and applications you control.
+- Authentication, target-domain cookies, strict CSP, Service Workers, file uploads, POST navigation, and some cross-origin modules may not work in the isolated preview.
+- External sites may deliberately block embedding, automation, or proxied resources.
+- Presentation mode currently creates and refines browser-based decks; native PPTX/PDF export and master-slide editing are future work.
 
 ## Roadmap
 
-- Drag-select empty areas and send four corner points, normalized coordinates, the nearest container, and a screenshot to the Agent.
-- Add new components where no existing DOM element is available.
-- Generate interactive HTML/CSS/JavaScript slide decks and annotate individual slides.
-- Move, resize, delete, multi-select, and annotate responsive breakpoints.
-- Compare before-and-after visuals and retain annotation history.
+- Responsive breakpoint annotations and multi-region editing.
+- Before/after visual comparison and annotation history.
+- Optional cropped visual context for models that support images.
+- Presentation templates, master layouts, and PPTX/PDF export.

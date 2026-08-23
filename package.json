@@ -1,6 +1,6 @@
 {
   "name": "dsh-frontend-feedback",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DeepSeek Harness plugin for building, previewing, annotating, and refining frontend pages",
   "type": "module",
   "main": "lib/index.js",
@@ -14,6 +14,7 @@
     "lib/client.js",
     "cordis.patch.yml",
     "skills/frontend-page-builder/SKILL.md",
+    "skills/presentation-builder/SKILL.md",
     "README.md",
     "README.zh-CN.md"
   ],

@@ -1,163 +1,172 @@
-# dsh-PageCraft
+# PageCraft
 
-[English](./README.md) | **简体中文**
+[English](./README.md) · **简体中文**
 
-面向 DeepSeek Harness Web 的前端构建与可视化评注插件。
+集成在 DeepSeek Harness 中的前端可视化评注工具。
 
-它把“让 Agent 创建页面 → 在 Harness 中预览 → 点击 DOM 元素写评注 → Agent 修改源码”串成一条连续工作流，不需要在浏览器、截图工具和聊天窗口之间来回切换。
+PageCraft 把类似 Codex 的可视化评注工作流带到 DeepSeek Harness：打开页面，直接指出需要修改的位置，再把准确的上下文交给负责代码的 Agent。在此基础上，它还增加了可调整的自由框选、多条评注队列、草稿恢复、迷你浏览器和网页演示文稿支持。
 
-## 功能
+> PageCraft 是独立项目，与 OpenAI 或 Codex 不存在隶属或官方合作关系。
 
-- 在输入框工具栏中增加始终可见的 `页面评注` 快捷按钮（包括空白会话），并在首次对话后继续保留顶部独立视图。
-- 直接预览本地开发页面或允许访问的远程页面。
-- 像迷你浏览器一样点击普通链接、提交 GET 搜索表单，并使用后退、前进和刷新。
-- 按会话保存预览网址和最近 50 条浏览历史，切换视图或刷新 Harness 后自动恢复。
-- 开启评注模式后，悬停并点击真实 DOM 元素。
-- 可以在没有现成 DOM 的位置拖动框选区域；松开后选框会保留，可从内部移动或拖动四边、四角缩放，确认后再把原始与吸附后的视口/页面矩形及四个顶点发送给 Agent。
-- 框选时自动吸附附近 DOM 的边缘和中心线，并回退到 8px 网格；同时记录建议容器与附近元素，帮助 Agent 做可靠对齐。
-- 自动采集 URL、CSS selector、DOM path、元素文本和位置。
-- 批量整理多条评注，一次发送给当前 Agent。
-- 内置 `frontend-page-builder` Skill，指导 Agent 初次构建页面并处理后续视觉反馈。
-- 自动避开 Harness 底部任务栏和消息输入框，预览区与评注队列均可独立滚动。
-- 选择工作区后，首次发送消息之前也会在输入框左下角的 `＋` 旁显示 `页面评注` 入口。
+![PageCraft 总览](docs/screenshots/overview.png)
 
-## 界面截图
+## 为什么需要 PageCraft？
 
-### 页面评注总览
+当一次前端修改被简化成截图和“把那个卡片往下挪一点”时，关键信息已经丢失。Agent 仍然需要猜测具体元素、所属容器、布局如何变化以及用户所指的位置。
 
-![dsh-PageCraft 页面评注总览](docs/screenshots/overview.png)
+PageCraft 会把这些上下文留在评注里：选择已有 DOM 时采集元素和容器；选择空白区域时记录可调整的矩形及其相对容器坐标；最后把多条要求整理成精简、结构化的工单交给当前 Agent。
 
-### DOM 元素选择
+## 核心能力
 
-![dsh-PageCraft DOM 元素选择](docs/screenshots/element-selection.png)
+- **直接指出真实界面**：点击渲染后的 DOM，不再依赖截图和模糊描述。
+- **描述尚不存在的组件**：在空白位置画框，继续移动、缩放和对齐，再要求 Agent 新增内容。
+- **统一修改网页和演示文稿**：普通前端页面与 HTML/React 幻灯片共用一套评注方式。
+- **保持连续工作流**：支持前进、后退和刷新；关闭面板或重启 Harness 后仍可恢复网址、选区、评论和队列。
+- **提供可直接执行的上下文**：一次发送多条评注，并携带 DOM、布局意图、幻灯片身份及提前计算好的几何信息。
+- **使用独立构建 Skill**：`frontend-page-builder` 与 `presentation-builder` 分别约束网页和演示文稿的生成与修改。
 
-### 多条评注队列
+| DOM 选择 | 自由框选 | 评注队列 |
+| --- | --- | --- |
+| ![DOM 元素选择](docs/screenshots/element-selection.png) | 在没有 DOM 的位置画框，并移动、缩放和吸附对齐。 | ![多条评注队列](docs/screenshots/feedback-queue.png) |
 
-![dsh-PageCraft 多条评注队列](docs/screenshots/feedback-queue.png)
+## 快速开始
 
-## 最快启动方式
-
-下面以已经下载好的 DeepSeek Harness 源码为例。在 Harness 源码根目录执行：
+在 DeepSeek Harness 源码目录中执行：
 
 ```powershell
 pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft
 pnpm dsh web
 ```
 
-打开终端输出的 Harness 地址并选择工作区。即使还没有发送第一条消息，输入框左下角的 `＋` 旁也会显示 `页面评注` 按钮，点击后直接打开评注面板；会话产生内容后，顶部仍会同时提供 `页面评注` 标签。
+打开终端输出的 Harness 地址，选择一个工作区，然后点击输入框控件旁的 **PageCraft**。仓库已经包含编译后的 `lib/`，从 GitHub 安装时不需要单独构建插件。
 
-这就是普通使用所需的全部启动步骤。插件已经提交构建后的 `lib/`，从 GitHub 安装时不需要再单独编译插件。
+## 使用方式
 
-## 本地开发安装
+### 修改前端页面
 
-如果你正在修改本插件，希望 Harness 直接读取本地源码：
+1. 启动前端项目，在 PageCraft 中打开本地地址，例如 `http://localhost:5173`。
+2. 修改已有内容时点击“选择元素”；希望新增内容时点击“框选区域”。
+3. 写下一个或多个要求，加入队列后点击“发送给 Agent”。
+4. Agent 完成修改后，PageCraft 会重新加载预览，同时保留尚未发送的内容。
 
-```powershell
-git clone https://github.com/noabt187/dsh-PageCraft.git
-cd dsh-PageCraft
-npm install
-npm run build
+区域评注可以明确选择三种布局意图：
+
+- **插入**：加入正常布局流，并让后续内容自然移动。
+- **覆盖**：浮在当前布局上方，不改变原有文档流。
+- **替换**：替换选区当前覆盖的 DOM。
+
+### 创建和修改演示文稿
+
+1. 将 PageCraft 切换到“演示文稿”，点击“新建演示文稿”。
+2. 填写标题、观众、目标、页数、视觉风格和颜色模式。
+3. Agent 使用内置 `presentation-builder` Skill 创建可在浏览器运行的演示文稿。
+4. 打开 Agent 给出的预览地址，PageCraft 会发现各张幻灯片，并允许按元素或区域逐页评注。
+
+新演示文稿默认使用浅色设计，只有主动选择时才会继承项目主题或使用深色。当前模式面向交互式 HTML/React 演示文稿，暂未实现 PPTX/PDF 导出。
+
+## Agent 收到什么？
+
+PageCraft 发送的是精简工单，而不只是一张截图。例如，一条区域评注可以是：
+
+```json
+{
+  "annotations": [
+    {
+      "id": 1,
+      "type": "area",
+      "operation": "insert",
+      "target": {
+        "container": { "selector": ".dashboard" },
+        "position": {
+          "x": 24,
+          "y": 320,
+          "width": 720,
+          "height": 180,
+          "corners": {
+            "topLeft": [24, 320],
+            "topRight": [744, 320],
+            "bottomRight": [744, 500],
+            "bottomLeft": [24, 500]
+          }
+        }
+      },
+      "request": "在这里新增统计卡片，并与上方卡片保持对齐。"
+    }
+  ]
+}
 ```
 
-然后回到 DeepSeek Harness 源码目录，把插件目录链接到 `web` profile：
+矩形尺寸和容器偏移在发送前就由插件计算完成。Agent 可以把推理能力用于定位源码和调整布局，而不是重新猜测坐标。
 
-```powershell
-pnpm dsh plugin --profile web add <你的 dsh-PageCraft 本地路径>
-pnpm dsh web
-```
-
-每次修改插件后执行：
-
-```powershell
-npm run build
-```
-
-再刷新 Harness 网页即可。使用本地路径安装时，profile 会保留对插件目录的链接，因此通常不需要重复安装。
-
-## 使用流程
-
-1. 选择工作区，在让 Agent 构建并启动前端页面之前或之后，都可以点击输入框工具栏中的 `页面评注`。
-2. 输入页面地址，例如 `http://localhost:5173`。
-3. 点击 `打开`，确认页面能够在中间预览区显示。
-4. 点击 `开始评注`，再点击需要修改的页面元素。
-5. 在右侧写下修改要求，并加入评注队列。
-6. 可以继续选择其他元素；完成后点击 `发送给 Agent`。
-7. Agent 修改源码后，点击刷新按钮查看结果并继续下一轮。
-
-## 它是怎么工作的
+## 工作原理
 
 ```text
 目标网页
-   │
-   ▼
-Harness Host 预览路由 ── 获取 HTML、保留资源基址、注入评注脚本
-   │
-   ▼
-沙箱 iframe ── 悬停高亮、DOM 选择、采集 selector/path/rect
-   │ postMessage
-   ▼
-页面评注视图 ── 编辑和整理评注队列
-   │ session.prompt(..., "queue")
-   ▼
-当前 Agent ── 加载 frontend-page-builder Skill、定位源码并修改
+    │
+    ▼
+Harness 预览代理 ── 加载 HTML 与运行时资源
+    │
+    ▼
+隔离预览 ── DOM 选择、区域调整、幻灯片识别
+    │ 结构化评注
+    ▼
+当前 Agent + 对应 builder Skill
+    │
+    └──────────────► 修改源码 ► 刷新预览
 ```
 
-插件由三部分组成：
+PageCraft 主要由三层组成：
 
-1. **客户端视图**：注册 `conversation.view`，提供地址栏、iframe、DOM 选择和评注队列。
-2. **Host 预览路由**：获取目标 HTML，插入 `<base>` 和评注脚本，再返回给受控 iframe。页面中的链接和 GET 表单通过 `postMessage` 交回插件，下一页仍经由预览路由加载，因此跳转后仍能继续选取 DOM。
-3. **Frontend Builder Skill**：把结构化的 `[frontend-feedback]` 数据转换为源码修改、验证和刷新流程。
-
-评注发送给 Agent 时包含类似下面的证据：
-
-```text
-页面 URL: http://localhost:5173/
-CSS selector: #hero-title
-DOM path: html > body > main > section > h1
-元素文本: Build faster
-矩形位置: x=120, y=84, width=420, height=72
-修改要求: 标题更醒目，并增加一行产品说明
-```
-
-坐标用于提供视觉上下文，Agent 仍会优先修改原有 React/Vue/HTML/CSS 结构，而不是机械地添加绝对定位样式。
+1. **预览层**：Harness 中的迷你浏览器，提供导航和 Host 代理，用于加载本地页面或明确允许的远程页面。
+2. **评注层**：注入页面的脚本负责 DOM 命中、可调整矩形、对齐参考线、容器识别和幻灯片信息。
+3. **Agent 交接层**：把队列内容转换为 `[frontend-feedback]` 或 `[presentation-feedback]` 工单。
 
 ## 配置
 
-插件默认允许代理 HTTP/HTTPS 页面，并设置 5 MiB HTML 上限与 15 秒请求超时。可以在 Harness profile 中调整：
+本机页面始终可用。远程页面可以全部放行，也可以在 Harness profile 中逐个允许：
 
 ```yaml
 - id: frontend-feedback
   name: dsh-frontend-feedback
   config:
-    allowRemoteHosts: true
+    allowRemoteHosts: false
     allowedHosts:
-      - preview.internal.example
+      - preview.example.com
     maxHtmlBytes: 5242880
+    maxResourceBytes: 20971520
     requestTimeoutMs: 15000
 ```
 
-如果只评注本机页面，可将 `allowRemoteHosts` 设置为 `false`，并通过 `allowedHosts` 单独放行其他主机。
+只预览你信任的地址。PageCraft 会在隔离 iframe 中运行目标页面脚本，但它仍然主要面向本地开发环境和你能够控制的页面。
 
-## 开发与验证
+## 本地开发
 
 ```powershell
+git clone https://github.com/noabt187/dsh-PageCraft.git
+cd dsh-PageCraft
 npm install
 npm run check
 ```
 
-`npm run check` 会依次执行构建、自动化测试和 npm 包内容检查。构建产物位于 `lib/`。
+然后在 DeepSeek Harness 源码目录中链接本地插件：
+
+```powershell
+pnpm dsh plugin --profile web add <你的-dsh-PageCraft-路径>
+pnpm dsh web
+```
+
+修改源码后执行 `npm run build` 并刷新 Harness。`npm run check` 会完成构建、自动化测试和包内容检查。
 
 ## 已知限制
 
-- 当前代理的是 HTML 入口，不是完整反向代理。依赖目标域 Cookie、Service Worker、严格 CSP 或特殊跨域 ES Module 的网站可能无法完整运行。
-- 远程站点的部分接口和资源仍可能受到浏览器 CORS 策略限制。
-- 迷你浏览器支持普通 HTTP/HTTPS 链接和 GET 表单。POST 登录、文件上传、`window.open`、Service Worker 以及脚本直接修改 `location` 的场景暂不代理。
-- DeepSeek Harness 仍处于 developer preview，升级 Harness 后建议重新执行 `npm run check`。
+- PageCraft 最适合本地开发服务和你能够控制的应用。
+- 登录状态、目标域 Cookie、严格 CSP、Service Worker、文件上传、POST 跳转及部分跨域模块可能无法在隔离预览中运行。
+- 外部网站可能主动限制嵌入、自动化或代理资源。
+- 演示文稿模式目前创建和修改网页式幻灯片；原生 PPTX/PDF 导出和母版编辑属于后续功能。
 
-## Roadmap
+## 路线图
 
-- 空白区域拖拽框选，并发送四顶点、归一化坐标、最近容器和截图给 Agent。
-- 在没有现成 DOM 元素的位置新增组件。
-- HTML/CSS/JavaScript 交互式幻灯片生成与逐页评注。
-- 移动、缩放、删除、多选和响应式断点评注。
+- 响应式断点评注与多区域编辑。
 - 修改前后视觉对比与评注历史。
+- 为支持图片理解的模型附加可选区域截图。
+- 演示文稿模板、母版布局及 PPTX/PDF 导出。
