@@ -4,18 +4,18 @@
 
 Visual feedback and design workbench for frontend agents, built into DeepSeek Harness.
 
-PageCraft 0.4.0 keeps visual intent attached to source-level work: preview a page, select an element or draw a region, capture the active responsive context, and send a structured work order to the Agent that owns the code. It now adds an evidence-based task timeline and contextual editing guidance alongside source hints, screenshot context, visual history, safe recovery, themes, and cinematic-motion requests.
+PageCraft 0.4.1 keeps visual intent attached to source-level work: preview a page, select an element or draw a region, capture the active responsive context, and send a structured work order to the Agent that owns the code. It now adds automatic background completion sync, an evidence-based task timeline, and contextual editing guidance alongside source hints, screenshot context, visual history, safe recovery, themes, and cinematic-motion requests.
 
 > PageCraft is an independent project. It is not affiliated with or endorsed by OpenAI or Codex.
 
 ![PageCraft overview](docs/screenshots/overview.png)
 
-## What is new in 0.4.0
+## What is new in 0.4.1
 
 - **Evidence-based task timeline** — shows batch identity, elapsed time, actual DSH queue position, and observable prepare/locate/edit/verify/finalize stages without invented percentages or ETAs.
 - **Contextual editing guidance** — recognizes actions, text, forms, containers, media, and regions, then offers editable drafts that include the selected target, breakpoint, responsive scope, and safety constraints. Suggestions never auto-send or overwrite existing text.
 - **Explicit visual outcomes** — completed batches distinguish visible change, no visible change, and unavailable visual verification.
-- **Reopen reconciliation** — unfinished local batches reconnect to the current DSH session snapshot when PageCraft is reopened.
+- **Automatic background completion sync** — PageCraft may be closed while the Agent works. On reopen it correlates the persisted batch ID with the DSH queue and completed turns, then reloads the preview and captures the after state without requiring the panel to remain mounted.
 
 The detailed user guide is available in Chinese at [README.progress-guidance.zh-CN.md](./README.progress-guidance.zh-CN.md).
 
@@ -60,6 +60,12 @@ Re-run `npm run build` after source changes and refresh/restart Harness so it lo
 3. Use **Select element** for existing UI or **Select area** where new UI should be inserted.
 4. Optionally capture a screenshot, write one or more comments, queue them, and choose **Send to Agent**.
 5. PageCraft records a before snapshot. When the Agent run completes, it reloads the preview, captures the after state when available, and exposes the batch in **Compare & history**.
+
+### Automatic sync after Agent completion
+
+PageCraft does not need to remain open while the Agent runs. At submission it stores the batch ID and current completed-turn baseline. When reopened, it verifies that the request left the queue, the Agent is idle, the matching batch ID exists in the conversation, and a later Agent turn completed. It then advances the batch to finalization, reloads the iframe, and captures the after state automatically.
+
+If those facts are not yet available, PageCraft waits instead of claiming that an unrelated task completed the batch. Use **Recheck** on the progress card after the session history finishes loading. Reopening or rechecking is idempotent and does not create duplicate after captures.
 
 Area annotations carry one of three layout intents:
 
@@ -164,6 +170,7 @@ Available scripts:
 
 - Screenshot capture uses browser rendering primitives and may fail for cross-origin images/fonts or unsupported SVG `foreignObject`; failures are recorded rather than presented as successful visual evidence.
 - Visual comparison proves only what was captured at that URL and viewport. A passing build is not a visual assertion, and an unavailable capture is shown explicitly.
+- Automatic reconciliation requires the current DSH conversation window to retain the PageCraft request containing its batch ID and the corresponding completed turn. After extreme history truncation, load the relevant history and choose **Recheck**.
 - Safe recovery depends on the Agent having created `.pagecraft/history/<batchId>` recovery material and hashes for the batch. Without valid material, restore must stop.
 - Authentication, target-domain cookies, strict CSP, Service Workers, file uploads, POST navigation, and some cross-origin modules may not work in the isolated preview.
 - External sites may block embedding, automation, or proxied resources.

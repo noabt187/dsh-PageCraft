@@ -50,6 +50,7 @@ import { GuidanceEditor } from './guidance.tsx'
 import { ProgressTimeline } from './progress.tsx'
 import { deriveBatchProgress } from '../progress.ts'
 import type { PageCraftSessionSnapshot } from '../progress.ts'
+import { maxCompletedTurn, reconcilePageCraftBatches } from '../reconciliation.ts'
 
 export const inject = ['slots', 'sessions']
 
@@ -114,7 +115,13 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const EMPTY_SESSION_SNAPSHOT: PageCraftSessionSnapshot = Object.freeze({ running: false, queue: [], runningCalls: [] })
+const EMPTY_SESSION_SNAPSHOT: PageCraftSessionSnapshot = Object.freeze({
+  running: false,
+  queue: [],
+  runningCalls: [],
+  nodes: [],
+  turnEnds: new Map(),
+})
 
 function useSessionSnapshot(activity: SessionActivity | null): PageCraftSessionSnapshot {
   const subscribe = useCallback((listener: () => void) => activity?.subscribe(listener) ?? (() => {}), [activity])
@@ -322,6 +329,7 @@ function FrontendFeedbackPanel({
   const [studioBusy, setStudioBusy] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [clock, setClock] = useState(Date.now())
+  const [reconcileNonce, setReconcileNonce] = useState(0)
   const loadedUrl = currentPreviewUrl(navigation)
   const canGoBack = navigation.index > 0
   const canGoForward = navigation.index < navigation.entries.length - 1
@@ -477,34 +485,7 @@ function FrontendFeedbackPanel({
   useEffect(() => {
     const wasRunning = previousAgentRunningRef.current
     previousAgentRunningRef.current = agentRunning
-    if (!wasRunning && agentRunning && activeBatchIdRef.current !== null) {
-      const batchId = activeBatchIdRef.current
-      void (async () => {
-        const record = (await historyStore.list(storageId)).find(item => item.id === batchId)
-        if (record?.status === 'queued') {
-          await historyStore.put(transitionBatch(record, 'running'))
-          await refreshHistory()
-        }
-      })()
-      return
-    }
     if (!wasRunning || agentRunning) return
-
-    const activeBatchId = activeBatchIdRef.current
-    if (activeBatchId !== null) {
-      void (async () => {
-        const record = (await historyStore.list(storageId)).find(item => item.id === activeBatchId)
-        if (record !== undefined) {
-          const next = transitionBatch(record, 'capturing-after')
-          await historyStore.put(next)
-          pendingAfterBatchIdRef.current = activeBatchId
-          await refreshHistory()
-        }
-        activeBatchIdRef.current = null
-        refreshPreview('Agent 已完成，正在同步最新页面…', 'Agent 修改完成，正在捕获修改后页面。')
-      })()
-      return
-    }
     const rollbackBatchId = activeRollbackBatchIdRef.current
     if (rollbackBatchId !== null) {
       activeRollbackBatchIdRef.current = null
@@ -512,43 +493,56 @@ function FrontendFeedbackPanel({
       refreshPreview('Agent 已完成恢复检查，正在同步页面…', '正在捕获恢复后的页面。')
       return
     }
-    if (selection !== null || queued.length > 0) {
-      setStatus('Agent 已完成修改。当前还有未发送评注，为避免丢失没有自动刷新；请处理评注后点击上方刷新按钮。')
-      return
-    }
-    refreshPreview('Agent 已完成，正在同步最新页面…', 'Agent 修改完成，页面评注已自动加载最新页面。')
-  }, [agentRunning, historyStore, queued.length, refreshHistory, refreshPreview, selection, storageId])
+  }, [agentRunning, refreshPreview])
 
   useEffect(() => {
     if (reconcileBusyRef.current || pendingAfterBatchIdRef.current !== null) return
-    const unfinished = history
-      .filter(record => record.status === 'queued' || record.status === 'running')
-      .sort((a, b) => a.createdAt - b.createdAt)
-    if (unfinished.length === 0 || activeBatchIdRef.current !== null) return
-    const queue = sessionSnapshot.queue
-    const runningCandidate = unfinished.find(record => !queue?.some(item => (item.preview ?? '').includes(record.id)))
+    const reconciliations = reconcilePageCraftBatches(history, sessionSnapshot)
+    const actionable = reconciliations.find(({ batchId, decision }) => {
+      const record = history.find(item => item.id === batchId)
+      if (record === undefined) return false
+      if (decision.kind === 'running') return record.status === 'queued' || record.observedRunning !== true
+      return decision.kind === 'completed' || decision.kind === 'failed'
+    })
+    if (actionable === undefined) return
+    const record = history.find(item => item.id === actionable.batchId)
+    if (record === undefined) return
 
-    if (agentRunning && runningCandidate !== undefined) {
-      activeBatchIdRef.current = runningCandidate.id
-      if (runningCandidate.status === 'queued') {
-        reconcileBusyRef.current = true
-        void historyStore.put(transitionBatch(runningCandidate, 'running'))
-          .then(refreshHistory)
-          .finally(() => { reconcileBusyRef.current = false })
-      }
+    reconcileBusyRef.current = true
+    if (actionable.decision.kind === 'running') {
+      activeBatchIdRef.current = record.id
+      const running = transitionBatch(record, 'running', { observedRunning: true })
+      void historyStore.put(running)
+        .then(refreshHistory)
+        .finally(() => { reconcileBusyRef.current = false })
+      return
+    }
+    if (actionable.decision.kind === 'failed') {
+      activeBatchIdRef.current = null
+      const error = actionable.decision.error
+      const failed = transitionBatch(record, 'failed', {
+        settledTurn: actionable.decision.turn,
+        error,
+      })
+      void historyStore.put(failed)
+        .then(refreshHistory)
+        .then(() => setStatus(`Agent 修改失败：${error}`))
+        .finally(() => { reconcileBusyRef.current = false })
+      return
+    }
+    if (actionable.decision.kind !== 'completed') {
+      reconcileBusyRef.current = false
       return
     }
 
-    const staleRunning = unfinished.find(record => record.status === 'running')
-    if (!agentRunning && staleRunning !== undefined) {
-      reconcileBusyRef.current = true
-      pendingAfterBatchIdRef.current = staleRunning.id
-      void historyStore.put(transitionBatch(staleRunning, 'capturing-after'))
-        .then(refreshHistory)
-        .then(() => refreshPreview('正在恢复未结算的 PageCraft 批次…', 'Agent 已结束，正在捕获修改后页面。'))
-        .finally(() => { reconcileBusyRef.current = false })
-    }
-  }, [agentRunning, history, historyStore, refreshHistory, refreshPreview, sessionSnapshot.queue])
+    activeBatchIdRef.current = null
+    pendingAfterBatchIdRef.current = record.id
+    const capturing = transitionBatch(record, 'capturing-after', { settledTurn: actionable.decision.turn })
+    void historyStore.put(capturing)
+      .then(refreshHistory)
+      .then(() => refreshPreview('检测到 Agent 已完成，正在同步最新页面…', 'Agent 修改完成，正在捕获修改后页面。'))
+      .finally(() => { reconcileBusyRef.current = false })
+  }, [history, historyStore, reconcileNonce, refreshHistory, refreshPreview, sessionSnapshot])
 
   useEffect(() => {
     const listener = (event: MessageEvent<FeedbackMessage>) => {
@@ -814,7 +808,12 @@ function FrontendFeedbackPanel({
           screenshot: item.screenshot ?? fallbackScreenshot,
         }
       })
-      batch = transitionBatch(batch, 'queued', { before, annotations: enrichedComments })
+      batch = transitionBatch(batch, 'queued', {
+        before,
+        annotations: enrichedComments,
+        submittedAt: Date.now(),
+        baselineCompletedTurn: maxCompletedTurn(sessionSnapshot),
+      })
       await historyStore.put(batch)
       await refreshHistory()
       const dataUrl = lastScreenshot?.dataUrl ?? before.dataUrl
@@ -855,7 +854,11 @@ function FrontendFeedbackPanel({
     try {
       batch = createVisualBatch({ sessionId: storageId, mode: workspaceMode, url: loadedUrl, annotations: [] })
       const before = await captureForStage('before')
-      batch = transitionBatch(batch, 'queued', { before })
+      batch = transitionBatch(batch, 'queued', {
+        before,
+        submittedAt: Date.now(),
+        baselineCompletedTurn: maxCompletedTurn(sessionSnapshot),
+      })
       await historyStore.put(batch)
       await refreshHistory()
       const image = before.dataUrl === undefined ? undefined : promptImageFromDataUrl(before.dataUrl, `pagecraft-${batch.id}-before.webp`)
@@ -1065,6 +1068,10 @@ function FrontendFeedbackPanel({
                 setShowHistory(true)
               }}
               onRefresh={() => refreshPreview('正在刷新最新页面…', '预览已刷新，可继续评注。')}
+              onReconcile={() => {
+                setStatus('正在重新核对 DSH 会话状态…')
+                setReconcileNonce(value => value + 1)
+              }}
             />
           ) : null}
 

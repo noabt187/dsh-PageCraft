@@ -1,4 +1,5 @@
 import type { VisualBatchRecord } from './history.ts'
+import type { ReconciliationSnapshot } from './reconciliation.ts'
 
 export type BatchProgressStage =
   | 'preparing'
@@ -14,6 +15,7 @@ export type BatchProgressStage =
 
 export interface PageCraftQueueItem {
   preview?: string
+  text?: string | null
   placement?: 'queued' | 'steering' | 'context' | string
 }
 
@@ -27,7 +29,7 @@ export interface PageCraftRunningToolCall {
   calls?: readonly PageCraftRunningToolCall[]
 }
 
-export interface PageCraftSessionSnapshot {
+export interface PageCraftSessionSnapshot extends ReconciliationSnapshot {
   running?: boolean
   queue?: readonly PageCraftQueueItem[]
   runningCalls?: readonly PageCraftRunningToolCall[]

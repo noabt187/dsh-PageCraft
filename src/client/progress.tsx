@@ -6,6 +6,7 @@ interface ProgressTimelineProps {
   progress: BatchProgress
   onHistory(): void
   onRefresh(): void
+  onReconcile(): void
 }
 
 const STEPS: readonly { stage: BatchProgressStage; label: string }[] = [
@@ -24,7 +25,7 @@ function outcomeLabel(progress: BatchProgress): string | null {
   return null
 }
 
-export function ProgressTimeline({ progress, onHistory, onRefresh }: ProgressTimelineProps) {
+export function ProgressTimeline({ progress, onHistory, onRefresh, onReconcile }: ProgressTimelineProps) {
   const [collapsed, setCollapsed] = useState(false)
   const terminal = progress.stage === 'completed' || progress.stage === 'failed'
   const longRunning = !terminal && progress.elapsedMs >= 60_000
@@ -74,6 +75,7 @@ export function ProgressTimeline({ progress, onHistory, onRefresh }: ProgressTim
           {progress.stage === 'failed' ? <div role="alert" style={styles.error}>{progress.error ?? progress.detail}</div> : null}
           <div style={styles.actions}>
             <button type="button" onClick={onHistory} style={styles.secondary}>查看比较与历史</button>
+            {!terminal ? <button type="button" onClick={onReconcile} style={styles.secondary}>重新检测</button> : null}
             {terminal ? <button type="button" onClick={onRefresh} style={styles.primary}>刷新预览</button> : null}
           </div>
         </>

@@ -46,6 +46,14 @@ export interface VisualBatchRecord {
   files?: BatchFileChange[]
   verification?: string
   error?: string
+  /** Time at which DSH accepted the PageCraft prompt. Optional for legacy history records. */
+  submittedAt?: number
+  /** Largest completed conversation turn observed immediately before submission. */
+  baselineCompletedTurn?: number
+  /** Whether PageCraft observed this batch owning a live Agent turn. */
+  observedRunning?: boolean
+  /** Conversation turn used to settle this batch after the Agent completed. */
+  settledTurn?: number
 }
 
 export interface CreateVisualBatchInput {
