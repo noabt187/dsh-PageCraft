@@ -3,6 +3,5 @@
       name: dsh-frontend-feedback
       config:
         allowRemoteHosts: true
-        allowedHosts: []
         maxHtmlBytes: 5242880
         requestTimeoutMs: 15000

@@ -1,6 +1,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import skillMarkdown from '../skills/frontend-page-builder/SKILL.md'
-import { assertPreviewUrl, buildPreviewHtml, escapeHtml, readHtmlWithLimit } from './preview.ts'
+import presentationSkillMarkdown from '../skills/presentation-builder/SKILL.md'
+import {
+  PREVIEW_RESOURCE_PATH,
+  PreviewRedirectError,
+  assertPreviewUrl,
+  buildPreviewHtml,
+  escapeHtml,
+  fetchPreviewTarget,
+  readBodyWithLimit,
+  readHtmlWithLimit,
+} from './preview.ts'
 
 export const name = 'frontend-feedback'
 export const inject = ['webServer', 'skills']
@@ -9,6 +19,7 @@ export interface Config {
   allowRemoteHosts?: boolean
   allowedHosts?: string[]
   maxHtmlBytes?: number
+  maxResourceBytes?: number
   requestTimeoutMs?: number
 }
 
@@ -33,8 +44,10 @@ interface PluginContext {
 }
 
 const DEFAULT_MAX_HTML_BYTES = 5 * 1024 * 1024
+const DEFAULT_MAX_RESOURCE_BYTES = 20 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 15_000
-const SKILL_DESCRIPTION = 'Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, or selector-specific iteration requests.'
+const SKILL_DESCRIPTION = 'Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM or area annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, selector-specific iteration, or adding content inside a user-drawn region.'
+const PRESENTATION_SKILL_DESCRIPTION = 'Create and refine browser-based HTML/React presentations from [presentation-create] briefs and [presentation-feedback] slide annotations, using coherent story structure, reusable layouts, stable PageCraft slide IDs, themes, and visual verification.'
 
 function markdownBody(source: string): string {
   return source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
@@ -112,19 +125,9 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS)
   try {
-    const upstream = await fetch(target, {
-      headers: { accept: 'text/html,application/xhtml+xml' },
-      redirect: 'follow',
-      signal: controller.signal,
-    })
+    const { response: upstream, target: finalTarget } = await fetchPreviewTarget(target, policy, controller.signal)
     if (!upstream.ok) {
       sendPreviewError(res, 502, `目标页面返回 HTTP ${upstream.status}`)
-      return
-    }
-    try {
-      assertPreviewUrl(upstream.url, policy)
-    } catch (error) {
-      sendPreviewError(res, 400, `重定向被拒绝：${describeError(error)}`)
       return
     }
     const contentType = upstream.headers.get('content-type')?.toLowerCase() ?? ''
@@ -133,7 +136,7 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
       return
     }
     const html = await readHtmlWithLimit(upstream, config.maxHtmlBytes ?? DEFAULT_MAX_HTML_BYTES)
-    const output = buildPreviewHtml(html, upstream.url)
+    const output = buildPreviewHtml(html, finalTarget.href)
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
@@ -142,10 +145,88 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
     })
     res.end(output)
   } catch (error) {
+    if (error instanceof PreviewRedirectError) {
+      sendPreviewError(res, 400, error.message)
+      return
+    }
     const message = error instanceof Error && error.name === 'AbortError'
       ? '获取目标页面超时'
       : `无法获取目标页面：${describeError(error)}`
     sendPreviewError(res, 502, message)
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function sendResourceError(res: ServerResponse, status: number, message: string): void {
+  res.writeHead(status, {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(message)
+}
+
+async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, config: Config): Promise<void> {
+  if (req.method !== 'GET') {
+    res.setHeader('allow', 'GET')
+    sendResourceError(res, 405, '只支持 GET')
+    return
+  }
+
+  const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+  const rawTarget = requestUrl.searchParams.get('url')
+  if (rawTarget === null || rawTarget.trim().length === 0) {
+    sendResourceError(res, 400, '缺少 url 查询参数')
+    return
+  }
+
+  const policy = {
+    allowRemoteHosts: config.allowRemoteHosts,
+    allowedHosts: config.allowedHosts,
+  }
+  let target: URL
+  try {
+    target = assertPreviewUrl(rawTarget, policy)
+  } catch (error) {
+    sendResourceError(res, 400, describeError(error))
+    return
+  }
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS)
+  try {
+    const requestAccept = Array.isArray(req.headers.accept)
+      ? req.headers.accept.join(',')
+      : req.headers.accept ?? '*/*'
+    const { response: upstream } = await fetchPreviewTarget(
+      target,
+      policy,
+      controller.signal,
+      fetch,
+      requestAccept,
+    )
+    if (!upstream.ok) {
+      sendResourceError(res, upstream.status, `目标资源返回 HTTP ${upstream.status}`)
+      return
+    }
+    const body = await readBodyWithLimit(upstream, config.maxResourceBytes ?? DEFAULT_MAX_RESOURCE_BYTES)
+    res.writeHead(upstream.status, {
+      'content-type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'cross-origin-resource-policy': 'cross-origin',
+    })
+    res.end(body)
+  } catch (error) {
+    if (error instanceof PreviewRedirectError) {
+      sendResourceError(res, 400, error.message)
+      return
+    }
+    const message = error instanceof Error && error.name === 'AbortError'
+      ? '获取目标资源超时'
+      : `无法获取目标资源：${describeError(error)}`
+    sendResourceError(res, 502, message)
   } finally {
     clearTimeout(timeout)
   }
@@ -158,6 +239,12 @@ export function apply(ctx: PluginContext, config: Config = {}): void {
     handler: (req, res) => handlePreview(req, res, config),
   }), 'frontend-feedback: preview route')
 
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PREVIEW_RESOURCE_PATH,
+    handler: (req, res) => handlePreviewResource(req, res, config),
+  }), 'frontend-feedback: preview resource route')
+
   ctx.skills.register({
     name: 'frontend-page-builder',
     description: SKILL_DESCRIPTION,
@@ -168,21 +255,56 @@ export function apply(ctx: PluginContext, config: Config = {}): void {
     },
     content: markdownBody(skillMarkdown),
   })
+
+  ctx.skills.register({
+    name: 'presentation-builder',
+    description: PRESENTATION_SKILL_DESCRIPTION,
+    source: 'bundled',
+    resourceBase: {
+      kind: 'opaque',
+      description: 'The skill is bundled into dsh-frontend-feedback and is self-contained.',
+    },
+    content: markdownBody(presentationSkillMarkdown),
+  })
 }
 
-export { assertPreviewUrl, buildPreviewHtml, readHtmlWithLimit } from './preview.ts'
+export {
+  MAX_PREVIEW_REDIRECTS,
+  PREVIEW_RESOURCE_PATH,
+  PreviewRedirectError,
+  assertPreviewUrl,
+  buildPreviewHtml,
+  buildPreviewRuntimeScript,
+  fetchPreviewTarget,
+  readBodyWithLimit,
+  readHtmlWithLimit,
+} from './preview.ts'
 export {
   DEFAULT_PREVIEW_URL,
   MAX_PREVIEW_HISTORY_ENTRIES,
+  MAX_PERSISTED_FEEDBACK_COMMENTS,
   buildAnnotationPrompt,
   currentPreviewUrl,
+  emptyFeedbackDraft,
+  feedbackDraftStorageKey,
+  isAreaSelection,
   isElementSelection,
+  isFeedbackComment,
+  isFeedbackDraftEmpty,
+  isFeedbackSelection,
   movePreviewNavigation,
   normalizePreviewUrl,
   previewHistoryStorageKey,
   previewUrlStorageKey,
   pushPreviewNavigation,
+  resolvePersistedFeedbackDraft,
   resolvePersistedPreviewNavigation,
   resolvePersistedPreviewUrl,
   resolvePreviewFrameLocation,
 } from './shared.ts'
+export {
+  DEFAULT_PRESENTATION_BRIEF,
+  buildPresentationCreationPrompt,
+  isPresentationSlideSummary,
+  resolvePresentationSlides,
+} from './presentation.ts'

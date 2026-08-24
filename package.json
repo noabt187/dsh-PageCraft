@@ -1,6 +1,6 @@
 {
   "name": "dsh-frontend-feedback",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "DeepSeek Harness plugin for building, previewing, annotating, and refining frontend pages",
   "type": "module",
   "main": "lib/index.js",
@@ -14,6 +14,7 @@
     "lib/client.js",
     "cordis.patch.yml",
     "skills/frontend-page-builder/SKILL.md",
+    "skills/presentation-builder/SKILL.md",
     "README.md",
     "README.zh-CN.md"
   ],
@@ -39,14 +40,16 @@
     "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-host-webserver": ">=0.1.0-rc.5 <0.2.0",
     "@deepseek-ai/dsh-skill": ">=0.1.0-rc.5 <0.2.0",
-    "react": "^18.2.0"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-client-runtime": { "optional": true },
     "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
     "@deepseek-ai/dsh-host-webserver": { "optional": true },
     "@deepseek-ai/dsh-skill": { "optional": true },
-    "react": { "optional": true }
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
