@@ -12,6 +12,7 @@ import {
   feedbackDraftStorageKey,
   isFeedbackDraftEmpty,
   isFeedbackSelection,
+  isScreenshotCaptureResult,
   movePreviewNavigation,
   normalizePreviewUrl,
   previewHistoryStorageKey,
@@ -22,15 +23,47 @@ import {
   resolvePersistedPreviewUrl,
   resolvePreviewFrameLocation,
 } from '../shared.ts'
-import type { AreaOperation, FeedbackComment, FeedbackDraftState, FeedbackSelection, PreviewNavigationState } from '../shared.ts'
+import type {
+  AnnotationViewport,
+  AreaOperation,
+  FeedbackComment,
+  FeedbackDraftState,
+  FeedbackSelection,
+  PreviewNavigationState,
+  ResponsiveScope,
+  ScreenshotCaptureResult,
+  ScreenshotContext,
+} from '../shared.ts'
+import {
+  createVisualBatch,
+  transitionBatch,
+  VisualHistoryStore,
+} from '../history.ts'
+import type { VisualBatchRecord, VisualSnapshot } from '../history.ts'
+import { buildMotionPrompt, buildRollbackPrompt, buildThemePrompt } from '../studio.ts'
+import type { MotionPresetId, ThemePresetId } from '../studio.ts'
+import { VisualHistoryPanel } from './history.tsx'
 import { PresentationBriefDialog, SlideRail } from './presentation.tsx'
+import { BreakpointToolbar, StudioDrawer, VIEWPORT_PRESETS } from './studio.tsx'
+import type { ViewportPreset } from './studio.tsx'
 
 export const inject = ['slots', 'sessions']
 
 interface FrontendFeedbackInjected {
   sessionId: string
-  sendFeedback: ((text: string) => Promise<void>) | null
+  sendFeedback: ((text: string, image?: PromptImage) => Promise<SendFeedbackResult>) | null
   sessionActivity: SessionActivity | null
+}
+
+interface PromptImage {
+  mediaType: 'image/webp' | 'image/png' | 'image/jpeg' | 'image/gif'
+  data: string
+  name?: string
+}
+
+interface SendFeedbackResult {
+  imageDelivered: boolean
+  warning?: string
 }
 
 interface SessionActivity {
@@ -51,8 +84,16 @@ interface FeedbackMessage {
   message?: unknown
   status?: unknown
   rect?: { width?: unknown; height?: unknown }
+  active?: unknown
   slides?: unknown
   activeSlideId?: unknown
+  requestId?: unknown
+  ok?: unknown
+  dataUrl?: unknown
+  width?: unknown
+  height?: unknown
+  mimeType?: unknown
+  error?: unknown
 }
 
 const colors = {
@@ -83,10 +124,23 @@ const AREA_OPERATIONS: Array<{ value: AreaOperation; label: string; description:
   { value: 'replace', label: '替换', description: '替换框内受影响的现有内容' },
 ]
 
-function commentFrom(selection: FeedbackSelection, comment: string, areaOperation: AreaOperation): FeedbackComment {
+function commentFrom(
+  selection: FeedbackSelection,
+  comment: string,
+  areaOperation: AreaOperation,
+  viewport?: AnnotationViewport,
+  scope?: ResponsiveScope,
+  screenshot?: ScreenshotContext,
+): FeedbackComment {
+  const context = {
+    ...selection,
+    ...(viewport === undefined ? {} : { viewport }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(screenshot === undefined ? {} : { screenshot }),
+  }
   return selection.kind === 'area'
-    ? { ...selection, comment: comment.trim(), operation: areaOperation }
-    : { ...selection, comment: comment.trim() }
+    ? { ...context, kind: 'area', comment: comment.trim(), operation: areaOperation } as FeedbackComment
+    : { ...context, kind: 'element', comment: comment.trim() } as FeedbackComment
 }
 
 function cardTitle(item: FeedbackSelection | FeedbackComment): string {
@@ -170,6 +224,39 @@ function persistFeedbackDraft(sessionId: string, draft: FeedbackDraftState): voi
   writeStoredValue(key, JSON.stringify(draft))
 }
 
+function promptImageFromDataUrl(dataUrl: string, name: string): PromptImage | undefined {
+  const match = /^data:(image\/(?:webp|png|jpeg|gif));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl)
+  if (match === null) return undefined
+  return { mediaType: match[1] as PromptImage['mediaType'], data: match[2], name }
+}
+
+function annotationViewport(value: ViewportPreset): AnnotationViewport {
+  return {
+    preset: value.id,
+    width: value.width,
+    height: value.height,
+    devicePixelRatio: value.devicePixelRatio,
+  }
+}
+
+function snapshotFromCapture(
+  result: ScreenshotCaptureResult,
+  stage: VisualSnapshot['stage'],
+  url: string,
+  viewport: ViewportPreset,
+): VisualSnapshot {
+  const base = {
+    id: `${stage}-${Date.now().toString(36)}`,
+    stage,
+    capturedAt: Date.now(),
+    url,
+    viewport: annotationViewport(viewport),
+  }
+  return result.ok
+    ? { ...base, mimeType: result.mimeType, width: result.width, height: result.height, dataUrl: result.dataUrl }
+    : { ...base, error: result.error }
+}
+
 function FrontendFeedbackPanel({
   sessionId,
   sendFeedback,
@@ -184,6 +271,12 @@ function FrontendFeedbackPanel({
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const previousAgentRunningRef = useRef(agentRunning)
   const refreshNoticeRef = useRef<string | null>(null)
+  const captureResolversRef = useRef(new Map<string, (result: ScreenshotCaptureResult) => void>())
+  const activeBatchIdRef = useRef<string | null>(null)
+  const pendingAfterBatchIdRef = useRef<string | null>(null)
+  const activeRollbackBatchIdRef = useRef<string | null>(null)
+  const pendingRollbackBatchIdRef = useRef<string | null>(null)
+  const historyStore = useMemo(() => new VisualHistoryStore(), [])
   const initialNavigation = useMemo(() => readPersistedPreviewNavigation(storageId), [storageId])
   const initialDraft = useMemo(() => readPersistedFeedbackDraft(storageId), [storageId])
   const navigationRef = useRef(initialNavigation)
@@ -210,6 +303,16 @@ function FrontendFeedbackPanel({
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null)
   const [showPresentationBrief, setShowPresentationBrief] = useState(false)
   const [creatingPresentation, setCreatingPresentation] = useState(false)
+  const [viewport, setViewport] = useState<ViewportPreset>(VIEWPORT_PRESETS[0])
+  const [responsiveScope, setResponsiveScope] = useState<ResponsiveScope>('current-breakpoint')
+  const [captureBusy, setCaptureBusy] = useState(false)
+  const [lastScreenshot, setLastScreenshot] = useState<ScreenshotContext | undefined>(undefined)
+  const [history, setHistory] = useState<VisualBatchRecord[]>([])
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
+  const [showStudio, setShowStudio] = useState(false)
+  const [studioBusy, setStudioBusy] = useState(false)
+  const [rollbackBusy, setRollbackBusy] = useState(false)
   const loadedUrl = currentPreviewUrl(navigation)
   const canGoBack = navigation.index > 0
   const canGoForward = navigation.index < navigation.entries.length - 1
@@ -217,6 +320,18 @@ function FrontendFeedbackPanel({
   const previewFrame = useMemo(() => {
     return resolvePreviewFrameLocation(loadedUrl, window.location.href, revision)
   }, [loadedUrl, revision])
+
+  const refreshHistory = useCallback(async () => {
+    const records = await historyStore.list(storageId)
+    setHistory(records)
+    setSelectedHistoryId(current => current !== null && records.some(record => record.id === current)
+      ? current
+      : records[0]?.id ?? null)
+  }, [historyStore, storageId])
+
+  useEffect(() => {
+    void refreshHistory()
+  }, [refreshHistory])
 
   useEffect(() => {
     persistFeedbackDraft(storageId, { selection, areaOperation, comment, queued })
@@ -233,6 +348,7 @@ function FrontendFeedbackPanel({
     setSelectionMode(null)
     setAreaOperation('insert')
     setComment('')
+    setLastScreenshot(undefined)
     if (workspaceMode === 'presentation') {
       setSlides([])
       setActiveSlideId(null)
@@ -266,22 +382,133 @@ function FrontendFeedbackPanel({
     setRevision(value => value + 1)
   }, [])
 
+  const postResponsiveContext = useCallback(() => {
+    iframeRef.current?.contentWindow?.postMessage({
+      type: 'dsh-pagecraft-responsive-context',
+      viewport: annotationViewport(viewport),
+      scope: responsiveScope,
+    }, '*')
+  }, [responsiveScope, viewport])
+
+  useEffect(() => {
+    postResponsiveContext()
+  }, [postResponsiveContext])
+
+  const requestCapture = useCallback((kind: 'viewport' | 'selection'): Promise<ScreenshotCaptureResult> => {
+    return new Promise(resolve => {
+      const requestId = `capture-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const timeout = window.setTimeout(() => {
+        captureResolversRef.current.delete(requestId)
+        resolve({ type: 'dsh-pagecraft-capture-result', requestId, ok: false, error: '截图请求超时；DOM 评注仍可正常发送。' })
+      }, 12_000)
+      captureResolversRef.current.set(requestId, result => {
+        window.clearTimeout(timeout)
+        resolve(result)
+      })
+      iframeRef.current?.contentWindow?.postMessage({
+        type: 'dsh-pagecraft-capture-request',
+        requestId,
+        kind,
+        format: 'webp',
+        quality: 0.78,
+        maxDimension: 1600,
+      }, '*')
+    })
+  }, [])
+
+  useEffect(() => () => {
+    for (const [requestId, resolve] of captureResolversRef.current) {
+      resolve({ type: 'dsh-pagecraft-capture-result', requestId, ok: false, error: 'PageCraft 面板已关闭。' })
+    }
+    captureResolversRef.current.clear()
+  }, [])
+
+  const captureForStage = useCallback(async (stage: VisualSnapshot['stage']): Promise<VisualSnapshot> => {
+    const result = await requestCapture('viewport')
+    return snapshotFromCapture(result, stage, loadedUrl, viewport)
+  }, [loadedUrl, requestCapture, viewport])
+
+  const captureNow = useCallback(async () => {
+    setCaptureBusy(true)
+    try {
+      const result = await requestCapture(selection === null ? 'viewport' : 'selection')
+      if (!result.ok) {
+        setLastScreenshot({ kind: selection === null ? 'viewport' : 'selection', width: 1, height: 1, mimeType: 'image/png', error: result.error })
+        setStatus(`截图失败：${result.error}`)
+        return
+      }
+      setLastScreenshot({
+        kind: selection === null ? 'viewport' : 'selection',
+        width: result.width,
+        height: result.height,
+        mimeType: result.mimeType,
+        capturedAt: new Date().toISOString(),
+        dataUrl: result.dataUrl,
+      })
+      setStatus(`已捕获 ${result.width} × ${result.height} 截图；发送时会优先作为图像上下文交给 Agent。`)
+    } finally {
+      setCaptureBusy(false)
+    }
+  }, [requestCapture, selection])
+
   useEffect(() => {
     const wasRunning = previousAgentRunningRef.current
     previousAgentRunningRef.current = agentRunning
+    if (!wasRunning && agentRunning && activeBatchIdRef.current !== null) {
+      const batchId = activeBatchIdRef.current
+      void (async () => {
+        const record = (await historyStore.list(storageId)).find(item => item.id === batchId)
+        if (record?.status === 'queued') {
+          await historyStore.put(transitionBatch(record, 'running'))
+          await refreshHistory()
+        }
+      })()
+      return
+    }
     if (!wasRunning || agentRunning) return
 
+    const activeBatchId = activeBatchIdRef.current
+    if (activeBatchId !== null) {
+      void (async () => {
+        const record = (await historyStore.list(storageId)).find(item => item.id === activeBatchId)
+        if (record !== undefined) {
+          const next = transitionBatch(record, 'capturing-after')
+          await historyStore.put(next)
+          pendingAfterBatchIdRef.current = activeBatchId
+          await refreshHistory()
+        }
+        activeBatchIdRef.current = null
+        refreshPreview('Agent 已完成，正在同步最新页面…', 'Agent 修改完成，正在捕获修改后页面。')
+      })()
+      return
+    }
+    const rollbackBatchId = activeRollbackBatchIdRef.current
+    if (rollbackBatchId !== null) {
+      activeRollbackBatchIdRef.current = null
+      pendingRollbackBatchIdRef.current = rollbackBatchId
+      refreshPreview('Agent 已完成恢复检查，正在同步页面…', '正在捕获恢复后的页面。')
+      return
+    }
     if (selection !== null || queued.length > 0) {
       setStatus('Agent 已完成修改。当前还有未发送评注，为避免丢失没有自动刷新；请处理评注后点击上方刷新按钮。')
       return
     }
     refreshPreview('Agent 已完成，正在同步最新页面…', 'Agent 修改完成，页面评注已自动加载最新页面。')
-  }, [agentRunning, queued.length, refreshPreview, selection])
+  }, [agentRunning, historyStore, queued.length, refreshHistory, refreshPreview, selection, storageId])
 
   useEffect(() => {
     const listener = (event: MessageEvent<FeedbackMessage>) => {
       if (event.source !== iframeRef.current?.contentWindow) return
+      if (isScreenshotCaptureResult(event.data)) {
+        const resolve = captureResolversRef.current.get(event.data.requestId)
+        if (resolve !== undefined) {
+          captureResolversRef.current.delete(event.data.requestId)
+          resolve(event.data)
+        }
+        return
+      }
       if (event.data?.type === 'dsh-frontend-feedback-ready') {
+        postResponsiveContext()
         if (workspaceMode === 'presentation') {
           iframeRef.current?.contentWindow?.postMessage({
             type: 'dsh-frontend-feedback-request-deck-state',
@@ -295,6 +522,52 @@ function FrontendFeedbackPanel({
         }
         const refreshNotice = refreshNoticeRef.current
         refreshNoticeRef.current = null
+        const pendingBatchId = pendingAfterBatchIdRef.current
+        if (pendingBatchId !== null) {
+          pendingAfterBatchIdRef.current = null
+          void (async () => {
+            await new Promise(resolve => window.setTimeout(resolve, 180))
+            const after = await captureForStage('after')
+            const record = (await historyStore.list(storageId)).find(item => item.id === pendingBatchId)
+            if (record !== undefined) {
+              const completed = transitionBatch(record, after.error === undefined ? 'completed' : 'failed', {
+                after,
+                ...(after.error === undefined ? {} : { error: after.error }),
+              })
+              await historyStore.put(completed)
+              await refreshHistory()
+              setSelectedHistoryId(pendingBatchId)
+              setStatus(after.error === undefined
+                ? 'Agent 修改完成，已保存修改后快照，可打开“比较与历史”查看。'
+                : `Agent 修改完成，但修改后截图失败：${after.error}`)
+            }
+          })()
+          return
+        }
+        const pendingRollbackId = pendingRollbackBatchIdRef.current
+        if (pendingRollbackId !== null) {
+          pendingRollbackBatchIdRef.current = null
+          void (async () => {
+            await new Promise(resolve => window.setTimeout(resolve, 180))
+            const rollback = await captureForStage('rollback')
+            const record = (await historyStore.list(storageId)).find(item => item.id === pendingRollbackId)
+            if (record !== undefined) {
+              const unchanged = rollback.dataUrl !== undefined && rollback.dataUrl === record.after?.dataUrl
+              const resultStatus = unchanged ? 'rollback-conflict' : rollback.error === undefined ? 'rolled-back' : 'failed'
+              const next = transitionBatch(record, resultStatus, {
+                rollback,
+                ...(unchanged ? { error: '恢复后页面与修改后快照完全一致，请检查 Agent 是否报告了文件哈希冲突。' } : {}),
+                ...(rollback.error === undefined ? {} : { error: rollback.error }),
+              })
+              await historyStore.put(next)
+              await refreshHistory()
+              setStatus(resultStatus === 'rolled-back'
+                ? '恢复流程完成，已保存恢复后快照。'
+                : next.error ?? '恢复流程未能安全完成。')
+            }
+          })()
+          return
+        }
         setStatus(refreshNotice ?? (workspaceMode === 'presentation'
           ? '预览已加载。若页面含有 PageCraft 幻灯片标记，左侧会自动列出各页。'
           : '预览已加载。可选择 DOM 元素，或拖动框选区域来新增内容。'))
@@ -357,7 +630,7 @@ function FrontendFeedbackPanel({
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [navigatePreview, selection, workspaceMode])
+  }, [captureForStage, historyStore, navigatePreview, postResponsiveContext, refreshHistory, selection, storageId, workspaceMode])
 
   const openPreview = () => {
     navigatePreview(urlDraft)
@@ -388,7 +661,15 @@ function FrontendFeedbackPanel({
 
   const queueCurrent = () => {
     if (selection === null || comment.trim().length === 0) return
-    setQueued(items => [...items, commentFrom(selection, comment, areaOperation)])
+    const screenshot = lastScreenshot === undefined ? undefined : { ...lastScreenshot, dataUrl: undefined }
+    setQueued(items => [...items, commentFrom(
+      selection,
+      comment,
+      areaOperation,
+      annotationViewport(viewport),
+      responsiveScope,
+      screenshot,
+    )])
     if (selection.kind === 'area') clearAreaOverlay()
     setSelection(null)
     setAreaOperation('insert')
@@ -435,24 +716,136 @@ function FrontendFeedbackPanel({
 
   const sendAll = async () => {
     const comments = [...queued]
-    if (selection !== null && comment.trim().length > 0) comments.push(commentFrom(selection, comment, areaOperation))
+    const screenshot = lastScreenshot === undefined ? undefined : { ...lastScreenshot, dataUrl: undefined }
+    if (selection !== null && comment.trim().length > 0) comments.push(commentFrom(
+      selection,
+      comment,
+      areaOperation,
+      annotationViewport(viewport),
+      responsiveScope,
+      screenshot,
+    ))
     if (comments.length === 0) return
     if (sendFeedback === null) {
       setStatus('当前还没有会话，无法发送到 Agent。先创建会话后再发送。')
       return
     }
     setSending(true)
+    let batch: VisualBatchRecord | null = null
     try {
-      await sendFeedback(buildAnnotationPrompt(comments, { mode: workspaceMode }))
+      batch = createVisualBatch({ sessionId: storageId, mode: workspaceMode, url: loadedUrl, annotations: comments })
+      const before = await captureForStage('before')
+      const enrichedComments: FeedbackComment[] = comments.map(item => {
+        const fallbackScreenshot: ScreenshotContext = {
+          kind: 'before',
+          width: before.width ?? 1,
+          height: before.height ?? 1,
+          mimeType: before.mimeType === 'image/webp' ? 'image/webp' : 'image/png',
+          capturedAt: new Date(before.capturedAt).toISOString(),
+          ...(before.error === undefined ? {} : { error: before.error }),
+        }
+        if (item.kind === 'area') {
+          return {
+            ...item,
+            viewport: { ...item.viewport, preset: item.viewport.preset ?? viewport.id },
+            scope: item.scope ?? responsiveScope,
+            screenshot: item.screenshot ?? fallbackScreenshot,
+          }
+        }
+        const existingViewport = item.viewport
+        return {
+          ...item,
+          viewport: existingViewport ?? annotationViewport(viewport),
+          scope: item.scope ?? responsiveScope,
+          screenshot: item.screenshot ?? fallbackScreenshot,
+        }
+      })
+      batch = transitionBatch(batch, 'queued', { before, annotations: enrichedComments })
+      await historyStore.put(batch)
+      await refreshHistory()
+      const dataUrl = lastScreenshot?.dataUrl ?? before.dataUrl
+      const image = dataUrl === undefined ? undefined : promptImageFromDataUrl(dataUrl, `pagecraft-${batch.id}-before.webp`)
+      const result = await sendFeedback(buildAnnotationPrompt(enrichedComments, { mode: workspaceMode, batchId: batch.id }), image)
+      activeBatchIdRef.current = batch.id
       setQueued([])
       setSelection(null)
       setAreaOperation('insert')
       setComment('')
-      setStatus(`已把 ${comments.length} 条评注发送到当前会话。`)
+      setLastScreenshot(undefined)
+      setStatus(result.warning === undefined
+        ? `已把 ${comments.length} 条评注作为批次 ${batch.id} 发送到当前会话${result.imageDelivered ? '，包含截图上下文' : ''}。`
+        : `评注已发送，但截图已降级为仅保存在历史：${result.warning}`)
     } catch (error) {
+      if (batch !== null) {
+        try {
+          const failed = transitionBatch(batch, 'failed', { error: describeError(error) })
+          await historyStore.put(failed)
+          await refreshHistory()
+        } catch {
+          // Keep the original send failure as the visible error.
+        }
+      }
       setStatus(`发送失败：${describeError(error)}`)
     } finally {
       setSending(false)
+    }
+  }
+
+  const sendStudioOrder = async (kind: 'theme' | 'motion', buildPrompt: (batchId: string) => string) => {
+    if (sendFeedback === null) {
+      setStatus('当前还没有会话，无法发送 Studio 工单。')
+      return
+    }
+    setStudioBusy(true)
+    let batch: VisualBatchRecord | null = null
+    try {
+      batch = createVisualBatch({ sessionId: storageId, mode: workspaceMode, url: loadedUrl, annotations: [] })
+      const before = await captureForStage('before')
+      batch = transitionBatch(batch, 'queued', { before })
+      await historyStore.put(batch)
+      await refreshHistory()
+      const image = before.dataUrl === undefined ? undefined : promptImageFromDataUrl(before.dataUrl, `pagecraft-${batch.id}-before.webp`)
+      const result = await sendFeedback(buildPrompt(batch.id), image)
+      activeBatchIdRef.current = batch.id
+      setShowStudio(false)
+      setStatus(`${kind === 'theme' ? '主题' : '动效'}工单已发送${result.warning === undefined ? '' : `；截图降级：${result.warning}`}`)
+    } catch (error) {
+      if (batch !== null) {
+        try { await historyStore.put(transitionBatch(batch, 'failed', { error: describeError(error) })) } catch {}
+      }
+      setStatus(`Studio 工单发送失败：${describeError(error)}`)
+    } finally {
+      setStudioBusy(false)
+      await refreshHistory()
+    }
+  }
+
+  const applyTheme = async (theme: ThemePresetId | 'extract-current', scope: 'current-page' | 'current-component' | 'design-system') => {
+    await sendStudioOrder('theme', batchId => buildThemePrompt({ batchId, theme, scope, viewport: annotationViewport(viewport) }))
+  }
+
+  const applyMotion = async (preset: MotionPresetId, intensity: 'subtle' | 'balanced' | 'cinematic') => {
+    await sendStudioOrder('motion', batchId => buildMotionPrompt({ batchId, preset, intensity, viewport: annotationViewport(viewport) }))
+  }
+
+  const rollbackBatch = async (record: VisualBatchRecord) => {
+    if (sendFeedback === null) return
+    setRollbackBusy(true)
+    try {
+      const hashes = Object.fromEntries((record.files ?? [])
+        .filter(file => file.afterHash !== undefined)
+        .map(file => [file.path, file.afterHash as string]))
+      const prompt = buildRollbackPrompt({ batchId: record.id, expectedPostHashes: hashes })
+      await historyStore.put(transitionBatch(record, 'rollback-pending'))
+      await sendFeedback(prompt)
+      activeRollbackBatchIdRef.current = record.id
+      setShowHistory(false)
+      setStatus(`已发送批次 ${record.id} 的安全恢复工单；Agent 会先核对文件哈希。`)
+      await refreshHistory()
+    } catch (error) {
+      setStatus(`无法发送恢复工单：${describeError(error)}`)
+    } finally {
+      setRollbackBusy(false)
     }
   }
 
@@ -537,6 +930,25 @@ function FrontendFeedbackPanel({
         {!hasSession ? <div style={styles.sessionHint}>先发一条消息后，右侧“发送给 Agent”才可提交。</div> : null}
       </div>
 
+      <div style={styles.studioToolbarRow}>
+        <BreakpointToolbar
+          value={viewport}
+          onChange={setViewport}
+          onCapture={() => { void captureNow() }}
+          captureBusy={captureBusy}
+          onHistory={() => setShowHistory(true)}
+          historyCount={history.length}
+          onStudio={() => setShowStudio(true)}
+        />
+        <label style={styles.scopeField}>响应范围
+          <select value={responsiveScope} onChange={event => setResponsiveScope(event.target.value as ResponsiveScope)} style={styles.scopeSelect}>
+            <option value="current-breakpoint">仅当前断点</option>
+            <option value="current-and-smaller">当前及更小断点</option>
+            <option value="all-breakpoints">全部断点</option>
+          </select>
+        </label>
+      </div>
+
       <div style={{ ...styles.workspace, ...(workspaceMode === 'presentation' ? styles.presentationWorkspace : {}) }}>
         {workspaceMode === 'presentation' ? (
           <SlideRail
@@ -547,6 +959,7 @@ function FrontendFeedbackPanel({
           />
         ) : null}
         <div style={styles.previewShell}>
+          <div style={{ ...styles.deviceFrame, width: viewport.width, height: viewport.height }}>
           <iframe
             ref={iframeRef}
             title="前端页面评注预览"
@@ -554,8 +967,9 @@ function FrontendFeedbackPanel({
             sandbox={previewFrame.allowSameOrigin
               ? 'allow-scripts allow-same-origin allow-forms allow-modals allow-popups'
               : 'allow-scripts allow-forms allow-modals allow-popups'}
-            style={styles.iframe}
+            style={{ ...styles.iframe, width: viewport.width, height: viewport.height }}
             onLoad={() => {
+              postResponsiveContext()
               if (selectionMode !== null) postAnnotatorMode(selectionMode)
               if (workspaceMode === 'presentation') {
                 iframeRef.current?.contentWindow?.postMessage({
@@ -570,6 +984,7 @@ function FrontendFeedbackPanel({
               }
             }}
           />
+          </div>
         </div>
 
         <aside style={styles.sidebar}>
@@ -625,6 +1040,13 @@ function FrontendFeedbackPanel({
                   <code style={styles.selector}>{selectionCode(selection)}</code>
                 </div>
                 {selectionSummary(selection) ? <p style={styles.selectedText}>{selectionSummary(selection)}</p> : null}
+                {selection.sourceHints !== undefined ? (
+                  <div style={styles.sourceHint}>
+                    <span>源码定位</span>
+                    <strong>{selection.sourceHints.file ?? selection.sourceHints.component ?? '候选组件'}</strong>
+                    <em>{Math.round(selection.sourceHints.confidence * 100)}% 证据置信度</em>
+                  </div>
+                ) : null}
                 {selection.kind === 'area' ? (
                   <div style={styles.operationField}>
                     <span style={styles.operationLabel}>新增内容如何影响当前布局</span>
@@ -693,6 +1115,26 @@ function FrontendFeedbackPanel({
           onSubmit={(brief) => { void createPresentation(brief) }}
         />
       ) : null}
+      {showHistory ? (
+        <VisualHistoryPanel
+          records={history}
+          selectedId={selectedHistoryId}
+          persistent={historyStore.isPersistent}
+          rollbackBusy={rollbackBusy}
+          onSelect={setSelectedHistoryId}
+          onDelete={id => { void historyStore.remove(id).then(refreshHistory) }}
+          onRollback={record => { void rollbackBatch(record) }}
+          onClose={() => setShowHistory(false)}
+        />
+      ) : null}
+      {showStudio ? (
+        <StudioDrawer
+          busy={studioBusy}
+          onClose={() => setShowStudio(false)}
+          onApplyTheme={(theme, scope) => { void applyTheme(theme, scope) }}
+          onApplyMotion={(preset, intensity) => { void applyMotion(preset, intensity) }}
+        />
+      ) : null}
     </div>
   )
 }
@@ -704,9 +1146,19 @@ function feedbackInjected(ctx: any, sessionId: string): FrontendFeedbackInjected
   return {
     sessionId,
     sessionActivity: session ?? null,
-    sendFeedback: session === undefined ? null : async (text) => {
-      const result = await session.prompt([{ type: 'text', text }], 'queue')
-      if (!result.ok) throw new Error(result.error.message)
+    sendFeedback: session === undefined ? null : async (text, image) => {
+      const content = image === undefined
+        ? [{ type: 'text', text }]
+        : [{ type: 'image', mediaType: image.mediaType, data: image.data, name: image.name }, { type: 'text', text }]
+      const result = await session.prompt(content, 'queue')
+      if (result.ok) return { imageDelivered: image !== undefined }
+      const message = result.error.message
+      if (image === undefined || !/image|vision|unsupported|content|多模态|图片/i.test(message)) {
+        throw new Error(message)
+      }
+      const fallback = await session.prompt([{ type: 'text', text }], 'queue')
+      if (!fallback.ok) throw new Error(fallback.error.message)
+      return { imageDelivered: false, warning: `当前模型或适配器不支持图像输入（${message}）` }
     },
   }
 }
@@ -785,6 +1237,9 @@ const styles: Record<string, any> = {
   modeButtonActive: { color: '#122217', borderColor: colors.accent, background: colors.accentStrong },
   areaModeButtonActive: { color: '#111d34', borderColor: '#8eb6ff', background: '#b9d0ff' },
   closeButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#2a211f', cursor: 'pointer', fontSize: 22, lineHeight: 1 },
+  studioToolbarRow: { display: 'flex', alignItems: 'stretch', borderBottom: `1px solid ${colors.border}`, background: '#101613' },
+  scopeField: { minWidth: 170, display: 'flex', alignItems: 'center', gap: 7, padding: '6px 12px', borderLeft: `1px solid ${colors.border}`, color: colors.muted, fontSize: 10 },
+  scopeSelect: { minWidth: 105, border: `1px solid ${colors.border}`, borderRadius: 6, padding: '5px 7px', color: colors.text, background: colors.panel2, fontSize: 10 },
   workspace: {
     flex: 1,
     minHeight: 0,
@@ -794,8 +1249,9 @@ const styles: Record<string, any> = {
     overflow: 'hidden',
   },
   presentationWorkspace: { gridTemplateColumns: 'minmax(170px, 220px) minmax(0, 1fr) minmax(280px, 340px)' },
-  previewShell: { minWidth: 0, minHeight: 0, padding: 12, background: '#090d0b' },
-  iframe: { display: 'block', width: '100%', height: '100%', border: `1px solid ${colors.border}`, borderRadius: 10, background: 'white' },
+  previewShell: { minWidth: 0, minHeight: 0, overflow: 'auto', padding: 18, background: 'radial-gradient(circle at 50% 8%,#18221d,#090d0b 62%)' },
+  deviceFrame: { margin: '0 auto', overflow: 'hidden', border: `1px solid ${colors.border}`, borderRadius: 10, background: 'white', boxShadow: '0 22px 70px rgba(0,0,0,.42)' },
+  iframe: { display: 'block', border: 0, background: 'white' },
   sidebar: { minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${colors.border}`, background: colors.panel },
   sidebarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 14px 12px', borderBottom: `1px solid ${colors.border}`, fontSize: 13 },
   sidebarHeaderActions: { display: 'flex', alignItems: 'center', gap: 7 },
@@ -819,6 +1275,7 @@ const styles: Record<string, any> = {
   areaTag: { color: '#111d34', background: '#b9d0ff' },
   selector: { minWidth: 0, overflow: 'hidden', color: colors.muted, fontSize: 10, textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   selectedText: { maxHeight: 42, overflow: 'hidden', margin: '9px 0', color: colors.muted, fontSize: 11, lineHeight: 1.45 },
+  sourceHint: { display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 7, alignItems: 'center', margin: '8px 0', padding: 8, border: '1px solid #30463a', borderRadius: 7, color: '#9eb0a4', background: '#142019', fontSize: 10 },
   operationField: { display: 'flex', flexDirection: 'column', gap: 6, margin: '10px 0' },
   operationLabel: { color: colors.text, fontSize: 11, fontWeight: 700 },
   operationGroup: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 5 },

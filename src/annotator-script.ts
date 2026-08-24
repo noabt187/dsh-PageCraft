@@ -70,6 +70,9 @@ export const ANNOTATOR_SCRIPT = String.raw`
   let draftRawBounds = null;
   let draftBounds = null;
   let draftGuides = [];
+  let lastSelectionRect = null;
+  let responsivePreset = null;
+  let responsiveScope = 'current-breakpoint';
 
   const isUi = (node) => node instanceof Element && Boolean(node.closest('[data-dsh-annotator-ui]'));
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -123,11 +126,214 @@ export const ANNOTATOR_SCRIPT = String.raw`
     return clone.outerHTML.trim().replace(/\s+/g, ' ').slice(0, maxLength);
   }
 
+  function cleanHint(value, maxLength) {
+    return typeof value === 'string' && value.trim()
+      ? value.trim().replace(/\s+/g, ' ').slice(0, maxLength)
+      : null;
+  }
+
+  function componentName(value) {
+    if (!value) return null;
+    if (typeof value === 'string') return /^[a-z]/.test(value) ? null : cleanHint(value, 160);
+    return cleanHint(value.displayName || value.name || value.__name, 160);
+  }
+
+  function parseSourceLocation(value) {
+    const source = cleanHint(value, 500);
+    if (!source) return {};
+    const match = source.match(/^(.*?):(\d+)(?::(\d+))?$/);
+    if (!match) return { file: source };
+    return {
+      file: match[1],
+      line: Number(match[2]),
+      ...(match[3] ? { column: Number(match[3]) } : {})
+    };
+  }
+
+  function explicitSourceHints(element) {
+    let current = element;
+    while (current instanceof Element) {
+      const source = current.getAttribute('data-pagecraft-source') || current.getAttribute('data-source-file');
+      const component = current.getAttribute('data-pagecraft-component') || current.getAttribute('data-component');
+      const stableAttribute = ['data-pagecraft-id', 'data-testid', 'data-test-id', 'data-cy']
+        .find((name) => current.hasAttribute(name));
+      const stableValue = stableAttribute ? current.getAttribute(stableAttribute) : null;
+      if (source || component || stableValue) {
+        const location = parseSourceLocation(source);
+        const explicitLineValue = current.getAttribute('data-source-line');
+        const explicitColumnValue = current.getAttribute('data-source-column');
+        const explicitLine = explicitLineValue === null ? NaN : Number(explicitLineValue);
+        const explicitColumn = explicitColumnValue === null ? NaN : Number(explicitColumnValue);
+        return {
+          ...location,
+          ...(component ? { component: cleanHint(component, 160) } : {}),
+          ...(stableAttribute && stableValue ? { stableId: stableAttribute + '=' + cleanHint(stableValue, 200) } : {}),
+          ...(Number.isInteger(explicitLine) && explicitLine > 0 ? { line: explicitLine } : {}),
+          ...(Number.isInteger(explicitColumn) && explicitColumn >= 0 ? { column: explicitColumn } : {}),
+          evidence: [
+            ...(source ? ['explicit:data-pagecraft-source'] : []),
+            ...(component ? ['explicit:data-pagecraft-component'] : []),
+            ...(stableAttribute ? ['stable:' + stableAttribute] : [])
+          ],
+          confidence: source ? 0.99 : component ? 0.94 : 0.82
+        };
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function reactSourceHints(element) {
+    let host = element;
+    let fiber = null;
+    const reactFiberPrefix = '__reactFiber' + String.fromCharCode(36);
+    const reactInstancePrefix = '__reactInternalInstance' + String.fromCharCode(36);
+    while (host instanceof Element && !fiber) {
+      const key = Object.keys(host).find((name) => name.startsWith(reactFiberPrefix) || name.startsWith(reactInstancePrefix));
+      fiber = key ? host[key] : null;
+      host = host.parentElement;
+    }
+    if (!fiber) return null;
+    const owners = [];
+    let file = null;
+    let line;
+    let column;
+    let current = fiber;
+    for (let depth = 0; current && depth < 32; depth += 1, current = current.return || current._debugOwner) {
+      const name = componentName(current.elementType || current.type);
+      if (name && !owners.includes(name)) owners.push(name);
+      const source = current._debugSource || current._debugInfo?.find?.((entry) => entry && entry.fileName);
+      if (!file && source?.fileName) {
+        file = cleanHint(source.fileName, 500);
+        line = Number.isInteger(source.lineNumber) && source.lineNumber > 0 ? source.lineNumber : undefined;
+        column = Number.isInteger(source.columnNumber) && source.columnNumber >= 0 ? source.columnNumber : undefined;
+      }
+    }
+    return {
+      framework: 'react',
+      ...(owners[0] ? { component: owners[0] } : {}),
+      ...(owners.length ? { owners: owners.slice(0, 16) } : {}),
+      ...(file ? { file } : {}),
+      ...(line ? { line } : {}),
+      ...(column !== undefined ? { column } : {}),
+      evidence: [file ? 'react:fiber-source' : 'react:fiber-owner'],
+      confidence: file ? 0.9 : owners.length ? 0.78 : 0.58
+    };
+  }
+
+  function vueSourceHints(element) {
+    let host = element;
+    let instance = null;
+    while (host instanceof Element && !instance) {
+      instance = host.__vueParentComponent || host.__vue__?.$ || host.__vue__ || null;
+      host = host.parentElement;
+    }
+    if (!instance) return null;
+    const owners = [];
+    let file = null;
+    let current = instance;
+    for (let depth = 0; current && depth < 24; depth += 1, current = current.parent || current.$parent) {
+      const type = current.type || current.$options || current;
+      const name = componentName(type);
+      if (name && !owners.includes(name)) owners.push(name);
+      if (!file) file = cleanHint(type?.__file, 500);
+    }
+    return {
+      framework: 'vue',
+      ...(owners[0] ? { component: owners[0] } : {}),
+      ...(owners.length ? { owners: owners.slice(0, 16) } : {}),
+      ...(file ? { file } : {}),
+      evidence: [file ? 'vue:component-file' : 'vue:component-instance'],
+      confidence: file ? 0.9 : owners.length ? 0.76 : 0.56
+    };
+  }
+
+  function svelteSourceHints(element) {
+    let current = element;
+    while (current instanceof Element) {
+      const metadata = current.__svelte_meta || current.__svelte?.meta || current.__svelte_component__;
+      const location = metadata?.loc || metadata?.location || metadata;
+      const file = cleanHint(location?.file || location?.filename || metadata?.file, 500);
+      const component = componentName(metadata?.component || metadata?.type || current.__svelte_component__?.constructor);
+      const hash = current.getAttribute('data-svelte-h');
+      if (metadata || hash) {
+        return {
+          framework: 'svelte',
+          ...(component ? { component, owners: [component] } : {}),
+          ...(file ? { file } : {}),
+          ...(Number.isInteger(location?.line) && location.line > 0 ? { line: location.line } : {}),
+          ...(hash ? { stableId: 'data-svelte-h=' + cleanHint(hash, 200) } : {}),
+          evidence: [metadata ? 'svelte:dev-metadata' : 'svelte:hydration-marker'],
+          confidence: file ? 0.88 : component ? 0.74 : 0.5
+        };
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function sourceHintsFor(element) {
+    const explicit = explicitSourceHints(element);
+    const framework = reactSourceHints(element) || vueSourceHints(element) || svelteSourceHints(element);
+    const selector = selectorFor(element);
+    const domEvidence = [
+      ('dom:selector=' + selector).slice(0, 300),
+      ...(element.matches('a[href],button,input,select,textarea,[role="button"],[role="link"]') ? ['dom:interactive-element'] : []),
+      ...(['flex', 'grid'].includes(getComputedStyle(element).display) ? ['layout:' + getComputedStyle(element).display] : [])
+    ];
+    if (explicit) {
+      return {
+        ...(framework || { framework: 'unknown' }),
+        ...explicit,
+        owners: explicit.component
+          ? Array.from(new Set([explicit.component, ...(framework?.owners || [])])).slice(0, 16)
+          : framework?.owners,
+        evidence: Array.from(new Set([...explicit.evidence, ...(framework?.evidence || []), ...domEvidence])).slice(0, 24),
+        confidence: Math.max(explicit.confidence, framework?.confidence || 0)
+      };
+    }
+    if (framework) {
+      return {
+        ...framework,
+        evidence: Array.from(new Set([...framework.evidence, ...domEvidence])).slice(0, 24)
+      };
+    }
+    const stableId = element.id ? 'id=' + cleanHint(element.id, 200) : undefined;
+    return {
+      framework: 'unknown',
+      ...(stableId ? { stableId } : {}),
+      evidence: domEvidence,
+      confidence: stableId ? 0.42 : 0.24
+    };
+  }
+
+  function inferredViewportPreset() {
+    const presets = [
+      ['mobile', 390, 844],
+      ['tablet', 768, 1024],
+      ['laptop', 1280, 800],
+      ['desktop', 1440, 900]
+    ];
+    const exact = presets.find((entry) => entry[1] === innerWidth && entry[2] === innerHeight);
+    if (exact) return exact[0];
+    return responsivePreset || 'custom';
+  }
+
+  function annotationViewport() {
+    return {
+      preset: inferredViewportPreset(),
+      width: round(innerWidth),
+      height: round(innerHeight),
+      devicePixelRatio: devicePixelRatio || 1
+    };
+  }
+
   function domSnapshot(element, maxLength) {
     return {
       tagName: element.localName,
       selector: selectorFor(element),
-      html: htmlSnippet(element, maxLength)
+      html: htmlSnippet(element, maxLength),
+      sourceHints: sourceHintsFor(element)
     };
   }
 
@@ -231,6 +437,13 @@ export const ANNOTATOR_SCRIPT = String.raw`
       current = current.parentElement;
     }
     const presentation = presentationContextFor(element);
+    const rect = {
+      x: round(bounds.x),
+      y: round(bounds.y),
+      width: round(bounds.width),
+      height: round(bounds.height)
+    };
+    lastSelectionRect = rect;
     return {
       kind: 'element',
       url: document.baseURI,
@@ -240,12 +453,10 @@ export const ANNOTATOR_SCRIPT = String.raw`
       text: (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 240),
       html: htmlSnippet(element, MAX_ELEMENT_HTML),
       container: domSnapshot(containerForElement(element), MAX_CONTAINER_HTML),
-      rect: {
-        x: round(bounds.x),
-        y: round(bounds.y),
-        width: round(bounds.width),
-        height: round(bounds.height)
-      },
+      rect,
+      sourceHints: sourceHintsFor(element),
+      viewport: annotationViewport(),
+      scope: responsiveScope,
       ...(presentation ? { presentation } : {})
     };
   }
@@ -650,7 +861,8 @@ export const ANNOTATOR_SCRIPT = String.raw`
         width: round(item.rect.width),
         height: round(item.rect.height)
       },
-      distance: round(distance)
+      distance: round(distance),
+      sourceHints: sourceHintsFor(item.element)
     };
   }
 
@@ -683,7 +895,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
       .sort((a, b) => a.score - b.score)
       .slice(0, 6)
       .map((entry) => referenceDescription(entry.item, entry.relation, entry.distance));
-    return { container, nearby: ranked };
+    return { container, nearby: ranked, sourceElement: containerItem?.element };
   }
 
   function describeArea(rawBounds, bounds, guides) {
@@ -692,6 +904,14 @@ export const ANNOTATOR_SCRIPT = String.raw`
     const references = areaReferences(bounds);
     const finalGuides = uniqueGuides(guides);
     const presentation = areaPresentationContext(bounds);
+    const centerX = clamp(bounds.x + bounds.width / 2, 0, innerWidth - 1);
+    const centerY = clamp(bounds.y + bounds.height / 2, 0, innerHeight - 1);
+    let sourceElement = references.sourceElement || null;
+    if (!(sourceElement instanceof Element)) {
+      sourceElement = document.elementsFromPoint(centerX, centerY).find((element) => !isUi(element));
+    }
+    const currentViewport = annotationViewport();
+    lastSelectionRect = rounded;
     return {
       kind: 'area',
       url: document.baseURI,
@@ -699,12 +919,15 @@ export const ANNOTATOR_SCRIPT = String.raw`
       rawRect: roundedRaw,
       rect: rounded,
       viewport: {
+        preset: currentViewport.preset,
         width: round(innerWidth),
         height: round(innerHeight),
         scrollX: round(scrollX),
         scrollY: round(scrollY),
         devicePixelRatio: devicePixelRatio || 1
       },
+      scope: responsiveScope,
+      ...(sourceElement instanceof Element ? { sourceHints: sourceHintsFor(sourceElement) } : {}),
       alignment: {
         threshold: SNAP_THRESHOLD,
         guides: finalGuides
@@ -794,7 +1017,129 @@ export const ANNOTATOR_SCRIPT = String.raw`
     notifyAreaDraft();
   }
 
+  function applyResponsiveContext(value) {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.preset === 'string' && value.preset.trim() && value.preset.length <= 40) {
+      responsivePreset = value.preset.trim();
+    }
+    if (value.scope === 'current-breakpoint'
+      || value.scope === 'current-and-smaller'
+      || value.scope === 'all-breakpoints') {
+      responsiveScope = value.scope;
+    }
+  }
+
+  function captureBounds(kind, requestedRect) {
+    if (kind !== 'selection') return { x: 0, y: 0, width: innerWidth, height: innerHeight };
+    const candidate = requestedRect && [requestedRect.x, requestedRect.y, requestedRect.width, requestedRect.height].every(Number.isFinite)
+      ? requestedRect
+      : lastSelectionRect || draftBounds;
+    if (!candidate) throw new Error('No selected element or area is available to capture.');
+    const x = clamp(candidate.x, 0, Math.max(0, innerWidth - 1));
+    const y = clamp(candidate.y, 0, Math.max(0, innerHeight - 1));
+    const width = clamp(candidate.width, 1, innerWidth - x);
+    const height = clamp(candidate.height, 1, innerHeight - y);
+    return { x, y, width, height };
+  }
+
+  function screenshotDocumentClone() {
+    const clone = document.documentElement.cloneNode(true);
+    if (!(clone instanceof Element)) throw new Error('The document could not be cloned for capture.');
+    clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+    clone.querySelectorAll('[data-dsh-annotator-ui], script, noscript').forEach((node) => node.remove());
+    clone.style.margin = '0';
+    clone.style.width = Math.max(document.documentElement.scrollWidth, innerWidth) + 'px';
+    clone.style.minHeight = Math.max(document.documentElement.scrollHeight, innerHeight) + 'px';
+    return clone;
+  }
+
+  function loadCaptureImage(source) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('SVG foreignObject rendering is unavailable or a page resource could not be loaded.'));
+      image.src = source;
+    });
+  }
+
+  async function captureScreenshot(request) {
+    if (typeof XMLSerializer === 'undefined' || typeof Blob === 'undefined' || typeof URL?.createObjectURL !== 'function') {
+      throw new Error('This browser does not support SVG foreignObject screenshot capture.');
+    }
+    const kind = request.kind === 'selection' ? 'selection' : request.kind === 'viewport' ? 'viewport' : null;
+    if (!kind) throw new Error('Unsupported capture kind.');
+    const bounds = captureBounds(kind, request.rect);
+    const maxDimension = clamp(Number(request.maxDimension) || 1600, 256, 4096);
+    const scale = Math.min(1, maxDimension / Math.max(bounds.width, bounds.height));
+    const width = Math.max(1, Math.round(bounds.width * scale));
+    const height = Math.max(1, Math.round(bounds.height * scale));
+    const clone = screenshotDocumentClone();
+    const serialized = new XMLSerializer().serializeToString(clone);
+    const documentWidth = Math.max(document.documentElement.scrollWidth, innerWidth);
+    const documentHeight = Math.max(document.documentElement.scrollHeight, innerHeight);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + innerWidth + '" height="' + innerHeight + '" viewBox="0 0 ' + innerWidth + ' ' + innerHeight + '">'
+      + '<foreignObject x="-' + scrollX + '" y="-' + scrollY + '" width="' + documentWidth + '" height="' + documentHeight + '">'
+      + serialized + '</foreignObject></svg>';
+    const objectUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+    let image;
+    try {
+      image = await loadCaptureImage(objectUrl);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D capture is not available.');
+    context.drawImage(image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, width, height);
+    const requestedMimeType = request.format === 'png' ? 'image/png' : 'image/webp';
+    const quality = clamp(Number(request.quality) || 0.78, 0.1, 1);
+    let dataUrl;
+    try {
+      dataUrl = canvas.toDataURL(requestedMimeType, quality);
+    } catch {
+      throw new Error('The screenshot canvas is not exportable, usually because the page contains cross-origin images or fonts.');
+    }
+    let mimeType = requestedMimeType;
+    if (!dataUrl.startsWith('data:' + requestedMimeType + ';')) {
+      dataUrl = canvas.toDataURL('image/png');
+      mimeType = 'image/png';
+    }
+    return { dataUrl, width, height, mimeType };
+  }
+
+  async function handleCaptureRequest(request) {
+    const requestId = typeof request.requestId === 'string' || typeof request.requestId === 'number'
+      ? request.requestId
+      : null;
+    if (requestId === null) return;
+    try {
+      const result = await captureScreenshot(request);
+      post({ type: 'dsh-pagecraft-capture-result', requestId, ok: true, ...result });
+    } catch (error) {
+      post({
+        type: 'dsh-pagecraft-capture-result',
+        requestId,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
   window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    if (event.data?.type === 'dsh-pagecraft-capture-request') {
+      void handleCaptureRequest(event.data);
+      return;
+    }
+    if (event.data?.type === 'dsh-pagecraft-responsive-context'
+      || event.data?.type === 'dsh-frontend-feedback-set-viewport'
+      || event.data?.type === 'dsh-pagecraft-set-context') {
+      applyResponsiveContext(event.data.viewport || event.data);
+      if (event.data.scope) applyResponsiveContext({ scope: event.data.scope });
+      return;
+    }
     if (event.data?.type === 'dsh-frontend-feedback-set-mode') {
       setMode(event.data.mode);
       return;

@@ -1,6 +1,6 @@
 {
   "name": "dsh-frontend-feedback",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "DeepSeek Harness plugin for building, previewing, annotating, and refining frontend pages",
   "type": "module",
   "main": "lib/index.js",
@@ -13,6 +13,7 @@
     "lib/index.js",
     "lib/client.js",
     "cordis.patch.yml",
+    "skills/frontend-design/SKILL.md",
     "skills/frontend-page-builder/SKILL.md",
     "skills/presentation-builder/SKILL.md",
     "README.md",
@@ -32,8 +33,9 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --import tsx --test tests/**/*.test.ts",
-    "check": "npm run build && npm test && npm pack --dry-run --cache .npm-cache"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --import tsx --test tests/**/*.test.ts",
+    "check": "npm run typecheck && npm test && npm pack --dry-run --cache .npm-cache"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5 <0.2.0",
@@ -44,16 +46,32 @@
     "react-dom": "^18.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
-    "@deepseek-ai/dsh-host-webserver": { "optional": true },
-    "@deepseek-ai/dsh-skill": { "optional": true },
-    "react": { "optional": true },
-    "react-dom": { "optional": true }
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
     "esbuild": "^0.25.0",
-    "tsx": "^4.20.0"
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
   },
   "repository": {
     "type": "git",

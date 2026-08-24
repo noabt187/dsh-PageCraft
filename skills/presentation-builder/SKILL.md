@@ -1,6 +1,6 @@
 ---
 name: presentation-builder
-description: Create, redesign, and refine browser-based HTML/React presentations from [presentation-create] briefs and [presentation-feedback] slide annotations. Use for slide-deck story structure, reusable layouts, themes, responsive 16:9 rendering, per-slide PageCraft metadata, and visual verification.
+description: Create and refine browser-based HTML/React presentations from [presentation-create] briefs and structured [presentation-feedback] work orders, including sourceHints, batch recovery, breakpoint scope, screenshot context, and rendered visual verification.
 ---
 
 # Presentation Builder
@@ -39,12 +39,21 @@ Build a coherent browser-based presentation that PageCraft can discover, navigat
 ## Refine a deck
 
 1. Each annotation may include `slide.id`, `slide.title`, and `slide.index`. Use the stable slide ID to locate the deck data and owning layout component before using DOM selectors as supporting evidence.
-2. For `dom` annotations, treat `target.html`, `target.selector`, and `target.container` as rendered evidence, not guaranteed source code.
-3. For `area` annotations, use the provided container-relative position and four corners directly. Follow `insert`, `overlay`, or `replace` exactly, while expressing final placement through the slide's layout system when possible.
-4. Make the smallest coherent change that satisfies the selected slide without silently changing the story or style of unrelated slides.
-5. If feedback requests a deck-wide rule such as typography, color, footer, or spacing, change the shared theme/layout component and inspect representative slides for regressions.
-6. Preserve stable `data-pagecraft-slide-id` values and keep all slides discoverable in DOM order.
-7. Verify the edited slide at presentation size and check nearby slides for overflow, unexpected wrapping, style drift, and broken navigation.
+2. Rank `sourceHints` evidence before DOM fallback. Explicit PageCraft source markers and framework file metadata are strong evidence; component/owner names remain candidates. Read and cross-check candidate source against the slide ID and rendered DOM before editing. Never treat `confidence` as proof.
+3. For `dom` annotations, treat `target.html`, `target.selector`, text, and `target.container` as rendered evidence, not guaranteed source code.
+4. For `area` annotations, use the provided container-relative position and four corners directly. Follow `insert`, `overlay`, or `replace` exactly, while expressing final placement through the slide's layout system when possible.
+5. Honor `viewport` and `scope`. Keep the 16:9 composition intact while making smaller PageCraft panels inspectable; do not turn captured pixels into absolute layout values.
+6. Inspect attached screenshots as supporting evidence. If capture is unavailable or `history-only`, continue from slide/DOM evidence and report that visual context was not delivered; never embed Base64 prompt data in source.
+7. Make the smallest coherent change that satisfies the selected slide without silently changing the story or style of unrelated slides.
+8. If feedback requests a deck-wide rule such as typography, color, footer, or spacing, change the shared theme/layout component and inspect representative slides for regressions.
+9. Preserve stable `data-pagecraft-slide-id` values and keep all slides discoverable in DOM order.
+10. Verify the edited slide at presentation size, the requested breakpoint, and adjacent slides for overflow, unexpected wrapping, style drift, and broken navigation.
+
+## Batch and recovery protocol
+
+When a work order contains `batchId`, record pre-existing dirty files before editing. Generate `.pagecraft/history/<batchId>/manifest.json` plus a reverse patch limited to this batch, and ignore `.pagecraft/` from commits/builds. The manifest records affected files, pre/post hashes, checks, viewport, screenshot delivery, and preview URL. Do not overwrite pre-existing user changes or call repository-wide reset/clean commands.
+
+If a presentation recovery arrives as `[frontend-rollback]`, follow `frontend-page-builder`'s Safe rollback protocol: require recovery material, compare every expected post-hash, stop without mutation on any mismatch, apply only the batch reverse patch on a full match, and re-run the original checks.
 
 ## Visual quality rules
 
@@ -57,7 +66,8 @@ Build a coherent browser-based presentation that PageCraft can discover, navigat
 - Avoid the stereotypical AI deck look: large black or dark-navy backgrounds, blue-purple gradients, neon glow, glass panels, and repeated floating rounded cards. Light editorial, business, academic, and minimal decks should gain character from typography, composition, negative space, imagery, diagrams, and a controlled palette.
 - A separate `deck.json` is encouraged as the content source, but the browser preview must not depend on a cross-origin runtime request that fails inside PageCraft. Prefer bundler-supported JSON imports or a small generated data module; if runtime `fetch()` is used, verify it through the PageCraft preview rather than only in a direct browser tab.
 - Do not claim visual verification unless the rendered deck was actually inspected.
+- A successful build alone is not visual verification. State which slides and viewports were rendered and any screenshot/capture gap.
 
 ## Expected handoff
 
-Report the deck data file, rendering components, theme files, checks run, number of slides, and the exact preview URL. For refinements, map each annotation to the slide ID and source-level change.
+Report the batch ID, deck data file, rendering components, theme files, checks run, slides/viewports actually inspected, screenshot/comparison status, recovery material, and exact preview URL. For refinements, map each annotation to the slide ID and source-level change.

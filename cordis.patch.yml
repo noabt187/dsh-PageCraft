@@ -2,6 +2,12 @@
     - id: frontend-feedback
       name: dsh-frontend-feedback
       config:
-        allowRemoteHosts: true
+        allowRemoteHosts: false
+        allowPrivateHosts: false
+        allowedHosts: []
+        allowedRequestOrigins: []
         maxHtmlBytes: 5242880
+        maxResourceBytes: 20971520
         requestTimeoutMs: 15000
+        maxConcurrentRequests: 8
+        resourceTokenTtlMs: 60000

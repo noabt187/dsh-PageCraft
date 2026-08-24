@@ -466,6 +466,14 @@ test('client exposes one launcher and no duplicate conversation view', async () 
   assert.match(bundle, /buildPresentationCreationPrompt/)
   assert.match(bundle, /dsh-frontend-feedback-request-deck-state/)
   assert.match(bundle, /presentationWorkspace/)
+  assert.match(bundle, /dsh-pagecraft-capture-request/)
+  assert.match(bundle, /dsh-pagecraft-responsive-context/)
+  assert.match(bundle, /PageCraft Studio/)
+  assert.match(bundle, /VisualHistoryPanel/)
+  assert.match(bundle, /frontend-theme/)
+  assert.match(bundle, /frontend-motion/)
+  assert.match(bundle, /frontend-rollback/)
+  assert.match(bundle, /type:\s*"image"/)
   assert.doesNotMatch(bundle, /conversation\.view/)
   assert.equal(bundle.match(/ctx\.slots\.inject/g)?.length, 1)
 })
@@ -477,7 +485,7 @@ test('response reader enforces the configured byte limit', async () => {
   assert.deepEqual(Array.from(await readBodyWithLimit(new Response('abc'), 5)), [97, 98, 99])
 })
 
-test('plugin registers the host route and both builder skills', () => {
+test('plugin registers the host routes, frontend design, and both builder skills', () => {
   const registrations: unknown[] = []
   const skills: any[] = []
   const ctx = {
@@ -501,14 +509,17 @@ test('plugin registers the host route and both builder skills', () => {
     '/api/frontend-feedback/preview',
     '/api/frontend-feedback/resource',
   ])
-  assert.equal(skills.length, 2)
+  assert.equal(skills.length, 3)
   assert.equal(skills[0]?.name, 'frontend-page-builder')
   assert.match(skills[0]?.content, /## Initial build/)
   assert.doesNotMatch(skills[0]?.content, /^---/)
-  assert.equal(skills[1]?.name, 'presentation-builder')
-  assert.match(skills[1]?.content, /## Create a deck/)
-  assert.match(skills[1]?.content, /data-pagecraft-slide-id/)
-  assert.match(skills[1]?.content, /colorMode/)
-  assert.match(skills[1]?.content, /near-black/)
+  assert.equal(skills[1]?.name, 'frontend-design')
+  assert.match(skills[1]?.content, /## Produce an executable brief/)
   assert.doesNotMatch(skills[1]?.content, /^---/)
+  assert.equal(skills[2]?.name, 'presentation-builder')
+  assert.match(skills[2]?.content, /## Create a deck/)
+  assert.match(skills[2]?.content, /data-pagecraft-slide-id/)
+  assert.match(skills[2]?.content, /colorMode/)
+  assert.match(skills[2]?.content, /near-black/)
+  assert.doesNotMatch(skills[2]?.content, /^---/)
 })

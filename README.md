@@ -2,171 +2,160 @@
 
 **English** · [简体中文](./README.zh-CN.md)
 
-Visual feedback for frontend agents, built into DeepSeek Harness.
+Visual feedback and design workbench for frontend agents, built into DeepSeek Harness.
 
-PageCraft brings a Codex-style visual annotation loop to DeepSeek Harness: open a page, point at what should change, and send precise feedback to the Agent that owns the code. It extends that workflow with editable free-form regions, multi-item feedback queues, draft recovery, a mini browser, and browser-based presentation support.
+PageCraft 0.3.0 keeps visual intent attached to source-level work: preview a page, select an element or draw a region, capture the active responsive context, and send a structured work order to the Agent that owns the code. The Studio workbench adds source hints, screenshot context, visual history, safe recovery, design direction, themes, and cinematic-motion requests without making PageCraft itself rewrite the target repository.
 
 > PageCraft is an independent project. It is not affiliated with or endorsed by OpenAI or Codex.
 
 ![PageCraft overview](docs/screenshots/overview.png)
 
-## Why PageCraft?
+## What is new in 0.3.0
 
-Frontend feedback loses information when it becomes a screenshot and a sentence like “move that card a little lower.” The Agent still has to guess the element, its container, the intended layout behavior, and the exact location.
+- **Studio workbench** — a focused preview canvas with breakpoint controls, screenshot capture, visual history, and theme/motion entry points.
+- **DOM-to-source evidence** — `SourceHints` collect best-effort React, Vue, Svelte, and explicit `data-pagecraft-*` metadata such as component, owner chain, file, line, stable ID, evidence, and confidence. Hints narrow the search; the Agent must still read and cross-check candidate source before editing.
+- **Responsive annotations** — Desktop (1440×900), Laptop (1280×800), Tablet (768×1024), Mobile (390×844), and custom 240–7680 px viewports. Each annotation carries its viewport and one of `current-breakpoint`, `current-and-smaller`, or `all-breakpoints`.
+- **Image + text handoff** — PageCraft attempts to attach the current/before screenshot to the structured text work order. If the active model or adapter rejects image input, it retries with text only, retains the screenshot in visual history, and reports the downgrade instead of embedding Base64 in the prompt.
+- **Visual history and comparison** — each batch can store before, after, and rollback captures in IndexedDB and show a draggable before/after reveal or side-by-side fallback. History is capped at 50 records, 25 MB total, and 5 MB per snapshot; when IndexedDB is unavailable it falls back to in-memory session history.
+- **Safe recovery** — “Restore this batch” sends a `[frontend-rollback]` work order. The builder Skill requires batch-scoped recovery material and post-change hash checks, stops on mismatches, and forbids repository-wide reset/clean operations. Recovery is Agent-executed; PageCraft does not silently overwrite files.
+- **Three bundled Skills** — `frontend-design` turns intent into an art-direction brief; `frontend-page-builder` implements and verifies page changes; `presentation-builder` handles browser-based decks.
+- **Theme and cinematic work orders** — Studio can request Editorial Light, Product Neutral, Cinema Dark, or extraction of the current design system. It can also request layered depth, scroll reveal, subtle parallax, chapter transitions, spotlight masks, film texture, cinematic grading, or ambient video, with reduced-motion, mobile-fallback, and performance-budget instructions.
+- **Secure-by-default preview proxy** — remote and private hosts are denied unless explicitly enabled, with DNS/IP checks, redirect revalidation, origin controls, signed short-lived resource tokens, response limits, timeouts, and concurrency limits.
 
-PageCraft keeps that context attached to the feedback. It captures the selected DOM, its surrounding container, or an adjustable region with container-relative geometry, then sends a compact structured work order to the current Agent.
+## Quick start on DeepSeek Harness
 
-## Highlights
-
-- **Point at real UI** — select rendered DOM elements instead of describing them from memory.
-- **Draw what does not exist yet** — create, move, resize, and align a region where a new component should be added.
-- **Refine pages and presentations** — use the same annotation workflow for normal web pages and interactive HTML/React slide decks.
-- **Stay in the loop** — navigate with back, forward, and refresh; drafts and queues survive panel reloads and Harness restarts.
-- **Send implementation-ready context** — batch multiple comments into structured JSON with DOM evidence, layout intent, slide identity, and precomputed geometry.
-- **Build with dedicated Skills** — `frontend-page-builder` and `presentation-builder` keep page and deck generation rules separate from the annotation engine.
-
-| DOM selection | Adjustable regions | Feedback queue |
-| --- | --- | --- |
-| ![DOM selection](docs/screenshots/element-selection.png) | Draw, move, resize, and snap regions where no DOM exists yet. | ![Feedback queue](docs/screenshots/feedback-queue.png) |
-
-## Quick start
-
-From the DeepSeek Harness source directory:
+The `lxy` branch includes compiled `lib/` output, so a GitHub installation does not require a separate plugin build. From the DeepSeek Harness source directory:
 
 ```powershell
-pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft
+pnpm dsh plugin --profile web add github:noabt187/dsh-PageCraft#lxy
 pnpm dsh web
 ```
 
-Open the Harness URL printed in the terminal, select a workspace, and choose **PageCraft** beside the composer controls. The repository includes compiled `lib/` output, so a GitHub installation does not require a separate plugin build.
+Open the Harness URL printed in the terminal, select a workspace, and choose **PageCraft** beside the composer controls.
+
+For local development or an uncommitted build, first run `npm run build` in PageCraft, then install its absolute directory:
+
+```powershell
+pnpm dsh plugin --profile web add C:\absolute\path\to\dsh-PageCraft
+pnpm dsh web
+```
+
+Re-run `npm run build` after source changes and refresh/restart Harness so it loads the updated `lib/` bundle.
 
 ## Use PageCraft
 
-### Refine a web page
+### Refine a page
 
-1. Start the frontend project and open its local URL in PageCraft, for example `http://localhost:5173`.
-2. Choose **Select element** for existing UI or **Select area** for a component that does not exist yet.
-3. Write one or more comments, add them to the queue, and select **Send to Agent**.
-4. PageCraft reloads the preview when the Agent finishes while preserving any unsent work.
+1. Start the target frontend and open its local URL in PageCraft, for example `http://localhost:5173`.
+2. Choose a Desktop, Laptop, Tablet, Mobile, or custom viewport and select the responsive scope.
+3. Use **Select element** for existing UI or **Select area** where new UI should be inserted.
+4. Optionally capture a screenshot, write one or more comments, queue them, and choose **Send to Agent**.
+5. PageCraft records a before snapshot. When the Agent run completes, it reloads the preview, captures the after state when available, and exposes the batch in **Compare & history**.
 
-Area annotations support three explicit layout intents:
+Area annotations carry one of three layout intents:
 
 - **Insert** — add content to normal layout flow and move following content.
-- **Overlay** — place content above the current layout without reflowing it.
-- **Replace** — replace the DOM currently covered by the selected region.
+- **Overlay** — layer content above the current layout without reflowing it.
+- **Replace** — replace DOM covered by the selected region.
+
+### Use Studio themes and motion
+
+Open **Themes & motion** from the breakpoint toolbar. A theme or motion choice sends a structured `[frontend-theme]` or `[frontend-motion]` request; it does not paste a canned stylesheet into the page. The bundled Skills tell the Agent to map the request onto the existing design system, preserve behavior and accessibility, provide mobile/reduced-motion fallbacks, and validate the rendered result.
+
+### Compare and recover a batch
+
+Open **Compare & history** to inspect batch state and before/after captures. If recovery is needed, choose **Restore this batch**. The resulting `[frontend-rollback]` request must verify the expected post-change hashes and apply only the reverse patch created for that batch. If files have changed since the batch, recovery reports a conflict instead of overwriting newer work.
 
 ### Build and refine a presentation
 
-1. Switch PageCraft to **Presentation** and choose **New presentation**.
-2. Provide the title, audience, goal, slide count, visual style, and color mode.
-3. The Agent uses the bundled `presentation-builder` Skill to create a browser-based deck.
-4. Open the reported preview URL. PageCraft discovers the slides and lets you annotate each one by element or region.
-
-New decks default to a light visual system unless you explicitly choose an inherited or dark theme. The current presentation workflow targets interactive HTML/React decks; PPTX/PDF export is not implemented yet.
+Switch PageCraft to **Presentation**, create a browser-based deck, and open the preview URL returned by the Agent. PageCraft discovers stable slide IDs and supports the same element, region, source-hint, responsive, screenshot, history, and recovery protocol. Native PPTX/PDF export is not implemented.
 
 ## What the Agent receives
 
-PageCraft sends concise work orders rather than screenshots alone. A region request can look like this:
+PageCraft sends compact JSON work orders under markers such as `[frontend-feedback]`, `[presentation-feedback]`, `[frontend-theme]`, `[frontend-motion]`, and `[frontend-rollback]`. An annotation can include:
 
 ```json
 {
-  "annotations": [
-    {
-      "id": 1,
-      "type": "area",
-      "operation": "insert",
-      "target": {
-        "container": { "selector": ".dashboard" },
-        "position": {
-          "x": 24,
-          "y": 320,
-          "width": 720,
-          "height": 180,
-          "corners": {
-            "topLeft": [24, 320],
-            "topRight": [744, 320],
-            "bottomRight": [744, 500],
-            "bottomLeft": [24, 500]
-          }
-        }
-      },
-      "request": "Add a statistics card here and keep it aligned with the cards above."
-    }
-  ]
+  "id": 1,
+  "type": "element",
+  "target": { "selector": ".stats-card" },
+  "sourceHints": {
+    "framework": "react",
+    "component": "StatsCard",
+    "owners": ["Dashboard", "StatsGrid", "StatsCard"],
+    "file": "src/components/StatsCard.tsx",
+    "evidence": ["react-debug-source"],
+    "confidence": 0.92
+  },
+  "viewport": {
+    "preset": "mobile",
+    "width": 390,
+    "height": 844,
+    "devicePixelRatio": 2
+  },
+  "scope": "current-breakpoint",
+  "screenshot": {
+    "kind": "before",
+    "width": 390,
+    "height": 844,
+    "mimeType": "image/webp"
+  },
+  "request": "Stack the metrics without changing the desktop layout."
 }
 ```
 
-The plugin performs the rectangle and container-offset calculations before the request reaches the model. The Agent can spend its reasoning on the source change and layout, not on reconstructing coordinates.
+Screenshot bytes are transported as an image message when supported; only screenshot metadata appears in the JSON prompt. `SourceHints.confidence` is evidence quality, not proof of the source file.
 
-## How it works
+## Security configuration
 
-```text
-Target page
-    │
-    ▼
-Harness preview proxy ── loads HTML and runtime resources
-    │
-    ▼
-Isolated preview ── DOM selection, region editing, slide discovery
-    │ structured feedback
-    ▼
-Current Agent + matching builder Skill
-    │
-    └──────────────► source update ► preview refresh
-```
-
-PageCraft has three main layers:
-
-1. **Preview** — a small browser inside Harness with navigation and a host-side proxy for local or permitted remote pages.
-2. **Annotation** — an injected script for DOM hit testing, adjustable rectangles, alignment guides, container discovery, and slide metadata.
-3. **Agent handoff** — a queue that turns visual feedback into `[frontend-feedback]` or `[presentation-feedback]` work orders.
-
-## Configuration
-
-Localhost pages are always supported. Remote hosts can be enabled globally or allowed individually in the Harness profile:
+The bundled profile is intentionally restrictive:
 
 ```yaml
 - id: frontend-feedback
   name: dsh-frontend-feedback
   config:
     allowRemoteHosts: false
-    allowedHosts:
-      - preview.example.com
+    allowPrivateHosts: false
+    allowedHosts: []
+    allowedRequestOrigins: []
     maxHtmlBytes: 5242880
     maxResourceBytes: 20971520
     requestTimeoutMs: 15000
+    maxConcurrentRequests: 8
+    resourceTokenTtlMs: 60000
 ```
 
-Only preview hosts you trust. PageCraft executes target-page JavaScript inside an isolated iframe, but it is still designed primarily for local development and pages you control.
+- Loopback targets such as `localhost`, `127.0.0.1`, and `::1` are supported by default.
+- Add exact trusted public hosts to `allowedHosts`, or deliberately set `allowRemoteHosts: true` to permit public remote hosts after DNS/IP validation.
+- Set `allowPrivateHosts: true` only when LAN preview is required. Metadata, link-local, multicast, documentation, and other restricted ranges remain blocked.
+- `allowedRequestOrigins` can restrict preview API callers to explicit Harness origins. When empty, PageCraft still enforces same Harness host/port checks for browser-originated requests.
+- `maxConcurrentRequests` limits simultaneous proxy work. `resourceTokenTtlMs` controls signed resource-token lifetime and is bounded by the implementation to 1–300 seconds.
+- Host policy and resolved addresses are revalidated across redirects. HTML/resource byte limits and request timeouts remain active.
 
-## Local development
+Only preview pages you trust. Target JavaScript runs in a sandboxed iframe, but PageCraft is primarily intended for local development and controlled pages.
+
+## Local development and checks
 
 ```powershell
-git clone https://github.com/noabt187/dsh-PageCraft.git
+git clone --branch lxy https://github.com/noabt187/dsh-PageCraft.git
 cd dsh-PageCraft
 npm install
+npm run typecheck
 npm run check
 ```
 
-Link the local directory from the DeepSeek Harness source tree:
+Available scripts:
 
-```powershell
-pnpm dsh plugin --profile web add <path-to-dsh-PageCraft>
-pnpm dsh web
-```
-
-Run `npm run build` after source changes and refresh Harness. `npm run check` builds the plugin, runs the test suite, and validates the package contents.
+- `npm run build` builds the host and browser bundles into `lib/`.
+- `npm run typecheck` runs TypeScript with `tsc --noEmit`.
+- `npm test` builds and runs the Node test suite.
+- `npm run check` runs type checking, the build-backed test suite, and `npm pack --dry-run` package-content validation.
 
 ## Limitations
 
-- PageCraft works best with local development servers and applications you control.
+- Screenshot capture uses browser rendering primitives and may fail for cross-origin images/fonts or unsupported SVG `foreignObject`; failures are recorded rather than presented as successful visual evidence.
+- Visual comparison proves only what was captured at that URL and viewport. A passing build is not a visual assertion, and an unavailable capture is shown explicitly.
+- Safe recovery depends on the Agent having created `.pagecraft/history/<batchId>` recovery material and hashes for the batch. Without valid material, restore must stop.
 - Authentication, target-domain cookies, strict CSP, Service Workers, file uploads, POST navigation, and some cross-origin modules may not work in the isolated preview.
-- External sites may deliberately block embedding, automation, or proxied resources.
-- Presentation mode currently creates and refines browser-based decks; native PPTX/PDF export and master-slide editing are future work.
-
-## Roadmap
-
-- Responsive breakpoint annotations and multi-region editing.
-- Before/after visual comparison and annotation history.
-- Optional cropped visual context for models that support images.
-- Presentation templates, master layouts, and PPTX/PDF export.
+- External sites may block embedding, automation, or proxied resources.
+- Presentation mode targets interactive HTML/React decks; native PPTX/PDF export is not implemented.

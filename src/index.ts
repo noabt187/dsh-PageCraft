@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import skillMarkdown from '../skills/frontend-page-builder/SKILL.md'
+import frontendDesignSkillMarkdown from '../skills/frontend-design/SKILL.md'
 import presentationSkillMarkdown from '../skills/presentation-builder/SKILL.md'
 import {
   PREVIEW_RESOURCE_PATH,
@@ -11,16 +12,31 @@ import {
   readBodyWithLimit,
   readHtmlWithLimit,
 } from './preview.ts'
+import {
+  assertTrustedRequestSource,
+  createConcurrencyLimiter,
+  createResourceToken,
+  createResourceTokenSecret,
+  verifyResourceToken,
+} from './security.ts'
 
 export const name = 'frontend-feedback'
 export const inject = ['webServer', 'skills']
 
 export interface Config {
   allowRemoteHosts?: boolean
+  allowPrivateHosts?: boolean
   allowedHosts?: string[]
   maxHtmlBytes?: number
   maxResourceBytes?: number
   requestTimeoutMs?: number
+  maxConcurrentRequests?: number
+  resourceTokenTtlMs?: number
+  allowedRequestOrigins?: string[]
+}
+
+interface InternalConfig extends Config {
+  __resourceTokenSecret: Uint8Array
 }
 
 interface PluginContext {
@@ -46,7 +62,10 @@ interface PluginContext {
 const DEFAULT_MAX_HTML_BYTES = 5 * 1024 * 1024
 const DEFAULT_MAX_RESOURCE_BYTES = 20 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 15_000
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 8
+const DEFAULT_RESOURCE_TOKEN_TTL_MS = 60_000
 const SKILL_DESCRIPTION = 'Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM or area annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, selector-specific iteration, or adding content inside a user-drawn region.'
+const FRONTEND_DESIGN_SKILL_DESCRIPTION = 'Define a distinctive, accessible visual direction and executable design brief for new pages, substantial redesigns, or [frontend-theme] work orders. Use before implementation when visual hierarchy, tokens, responsive behavior, imagery, or motion need deliberate design judgment.'
 const PRESENTATION_SKILL_DESCRIPTION = 'Create and refine browser-based HTML/React presentations from [presentation-create] briefs and [presentation-feedback] slide annotations, using coherent story structure, reusable layouts, stable PageCraft slide IDs, themes, and visual verification.'
 
 function markdownBody(source: string): string {
@@ -92,14 +111,22 @@ function sendPreviewError(res: ServerResponse, status: number, message: string):
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
   })
   res.end(buildPreviewErrorHtml(status, message))
 }
 
-async function handlePreview(req: IncomingMessage, res: ServerResponse, config: Config): Promise<void> {
+async function handlePreview(req: IncomingMessage, res: ServerResponse, config: InternalConfig): Promise<void> {
   if (req.method !== 'GET') {
     res.setHeader('allow', 'GET')
     sendPreviewError(res, 405, '只支持 GET')
+    return
+  }
+
+  try {
+    assertTrustedRequestSource(req, false, config.allowedRequestOrigins)
+  } catch (error) {
+    sendPreviewError(res, 403, describeError(error))
     return
   }
 
@@ -112,6 +139,7 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
 
   const policy = {
     allowRemoteHosts: config.allowRemoteHosts,
+    allowPrivateHosts: config.allowPrivateHosts,
     allowedHosts: config.allowedHosts,
   }
   let target: URL
@@ -136,7 +164,12 @@ async function handlePreview(req: IncomingMessage, res: ServerResponse, config: 
       return
     }
     const html = await readHtmlWithLimit(upstream, config.maxHtmlBytes ?? DEFAULT_MAX_HTML_BYTES)
-    const output = buildPreviewHtml(html, finalTarget.href)
+    const resourceToken = createResourceToken(
+      finalTarget.origin,
+      config.__resourceTokenSecret,
+      config.resourceTokenTtlMs ?? DEFAULT_RESOURCE_TOKEN_TTL_MS,
+    )
+    const output = buildPreviewHtml(html, finalTarget.href, resourceToken)
     res.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
@@ -163,33 +196,50 @@ function sendResourceError(res: ServerResponse, status: number, message: string)
     'content-type': 'text/plain; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
   })
   res.end(message)
 }
 
-async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, config: Config): Promise<void> {
-  if (req.method !== 'GET') {
-    res.setHeader('allow', 'GET')
+async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, config: InternalConfig): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.setHeader('allow', 'GET, HEAD')
     sendResourceError(res, 405, '只支持 GET')
+    return
+  }
+
+  try {
+    assertTrustedRequestSource(req, false, config.allowedRequestOrigins)
+  } catch (error) {
+    sendResourceError(res, 403, describeError(error))
     return
   }
 
   const requestUrl = new URL(req.url ?? '/', 'http://localhost')
   const rawTarget = requestUrl.searchParams.get('url')
+  const token = requestUrl.searchParams.get('token')
   if (rawTarget === null || rawTarget.trim().length === 0) {
     sendResourceError(res, 400, '缺少 url 查询参数')
+    return
+  }
+  if (token === null || token.length === 0) {
+    sendResourceError(res, 403, '缺少资源访问令牌')
     return
   }
 
   const policy = {
     allowRemoteHosts: config.allowRemoteHosts,
+    allowPrivateHosts: config.allowPrivateHosts,
     allowedHosts: config.allowedHosts,
+    requiredOrigin: undefined as string | undefined,
   }
   let target: URL
   try {
     target = assertPreviewUrl(rawTarget, policy)
+    verifyResourceToken(token, target.origin, config.__resourceTokenSecret)
+    policy.requiredOrigin = target.origin
   } catch (error) {
-    sendResourceError(res, 400, describeError(error))
+    sendResourceError(res, 403, describeError(error))
     return
   }
 
@@ -205,6 +255,7 @@ async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, 
       controller.signal,
       fetch,
       requestAccept,
+      req.method === 'HEAD' ? 'HEAD' : 'GET',
     )
     if (!upstream.ok) {
       sendResourceError(res, upstream.status, `目标资源返回 HTTP ${upstream.status}`)
@@ -216,8 +267,9 @@ async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, 
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'cross-origin-resource-policy': 'cross-origin',
+      'referrer-policy': 'no-referrer',
     })
-    res.end(body)
+    res.end(req.method === 'HEAD' ? undefined : body)
   } catch (error) {
     if (error instanceof PreviewRedirectError) {
       sendResourceError(res, 400, error.message)
@@ -233,16 +285,37 @@ async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, 
 }
 
 export function apply(ctx: PluginContext, config: Config = {}): void {
+  const runtimeConfig: InternalConfig = {
+    ...config,
+    __resourceTokenSecret: createResourceTokenSecret(),
+  }
+  const limiter = createConcurrencyLimiter(config.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS)
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/api/frontend-feedback/preview',
-    handler: (req, res) => handlePreview(req, res, config),
+    handler: async (req, res) => {
+      const lease = limiter.acquire()
+      if (lease === null) {
+        res.setHeader('retry-after', '1')
+        sendPreviewError(res, 429, '预览请求过多，请稍后重试')
+        return
+      }
+      try { await handlePreview(req, res, runtimeConfig) } finally { lease.release() }
+    },
   }), 'frontend-feedback: preview route')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: PREVIEW_RESOURCE_PATH,
-    handler: (req, res) => handlePreviewResource(req, res, config),
+    handler: async (req, res) => {
+      const lease = limiter.acquire()
+      if (lease === null) {
+        res.setHeader('retry-after', '1')
+        sendResourceError(res, 429, '资源请求过多，请稍后重试')
+        return
+      }
+      try { await handlePreviewResource(req, res, runtimeConfig) } finally { lease.release() }
+    },
   }), 'frontend-feedback: preview resource route')
 
   ctx.skills.register({
@@ -254,6 +327,17 @@ export function apply(ctx: PluginContext, config: Config = {}): void {
       description: 'The skill is bundled into dsh-frontend-feedback and is self-contained.',
     },
     content: markdownBody(skillMarkdown),
+  })
+
+  ctx.skills.register({
+    name: 'frontend-design',
+    description: FRONTEND_DESIGN_SKILL_DESCRIPTION,
+    source: 'bundled',
+    resourceBase: {
+      kind: 'opaque',
+      description: 'The skill is bundled into dsh-frontend-feedback and is self-contained.',
+    },
+    content: markdownBody(frontendDesignSkillMarkdown),
   })
 
   ctx.skills.register({
@@ -280,6 +364,17 @@ export {
   readHtmlWithLimit,
 } from './preview.ts'
 export {
+  assertAddressAllowed,
+  assertTrustedRequestSource,
+  classifyPreviewAddress,
+  createConcurrencyLimiter,
+  createResourceToken,
+  createResourceTokenSecret,
+  normalizePreviewHost,
+  resolveAndAssertPreviewHost,
+  verifyResourceToken,
+} from './security.ts'
+export {
   DEFAULT_PREVIEW_URL,
   MAX_PREVIEW_HISTORY_ENTRIES,
   MAX_PERSISTED_FEEDBACK_COMMENTS,
@@ -302,6 +397,24 @@ export {
   resolvePersistedPreviewUrl,
   resolvePreviewFrameLocation,
 } from './shared.ts'
+export {
+  MOTION_PRESETS,
+  THEME_PRESETS,
+  buildMotionPrompt,
+  buildRollbackPrompt,
+  buildThemePrompt,
+} from './studio.ts'
+export {
+  MAX_HISTORY_BYTES,
+  MAX_HISTORY_RECORDS,
+  MAX_SNAPSHOT_BYTES,
+  createBatchId,
+  createVisualBatch,
+  estimateBatchBytes,
+  pruneVisualHistory,
+  transitionBatch,
+  validateSnapshot,
+} from './history.ts'
 export {
   DEFAULT_PRESENTATION_BRIEF,
   buildPresentationCreationPrompt,
