@@ -4,13 +4,22 @@
 
 Visual feedback and design workbench for frontend agents, built into DeepSeek Harness.
 
-PageCraft 0.3.0 keeps visual intent attached to source-level work: preview a page, select an element or draw a region, capture the active responsive context, and send a structured work order to the Agent that owns the code. The Studio workbench adds source hints, screenshot context, visual history, safe recovery, design direction, themes, and cinematic-motion requests without making PageCraft itself rewrite the target repository.
+PageCraft 0.4.0 keeps visual intent attached to source-level work: preview a page, select an element or draw a region, capture the active responsive context, and send a structured work order to the Agent that owns the code. It now adds an evidence-based task timeline and contextual editing guidance alongside source hints, screenshot context, visual history, safe recovery, themes, and cinematic-motion requests.
 
 > PageCraft is an independent project. It is not affiliated with or endorsed by OpenAI or Codex.
 
 ![PageCraft overview](docs/screenshots/overview.png)
 
-## What is new in 0.3.0
+## What is new in 0.4.0
+
+- **Evidence-based task timeline** — shows batch identity, elapsed time, actual DSH queue position, and observable prepare/locate/edit/verify/finalize stages without invented percentages or ETAs.
+- **Contextual editing guidance** — recognizes actions, text, forms, containers, media, and regions, then offers editable drafts that include the selected target, breakpoint, responsive scope, and safety constraints. Suggestions never auto-send or overwrite existing text.
+- **Explicit visual outcomes** — completed batches distinguish visible change, no visible change, and unavailable visual verification.
+- **Reopen reconciliation** — unfinished local batches reconnect to the current DSH session snapshot when PageCraft is reopened.
+
+The detailed user guide is available in Chinese at [README.progress-guidance.zh-CN.md](./README.progress-guidance.zh-CN.md).
+
+## 0.3.0 features
 
 - **Studio workbench** — a focused preview canvas with breakpoint controls, screenshot capture, visual history, and theme/motion entry points.
 - **DOM-to-source evidence** — `SourceHints` collect best-effort React, Vue, Svelte, and explicit `data-pagecraft-*` metadata such as component, owner chain, file, line, stable ID, evidence, and confidence. Hints narrow the search; the Agent must still read and cross-check candidate source before editing.

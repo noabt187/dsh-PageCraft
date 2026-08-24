@@ -46,6 +46,10 @@ import { VisualHistoryPanel } from './history.tsx'
 import { PresentationBriefDialog, SlideRail } from './presentation.tsx'
 import { BreakpointToolbar, StudioDrawer, VIEWPORT_PRESETS } from './studio.tsx'
 import type { ViewportPreset } from './studio.tsx'
+import { GuidanceEditor } from './guidance.tsx'
+import { ProgressTimeline } from './progress.tsx'
+import { deriveBatchProgress } from '../progress.ts'
+import type { PageCraftSessionSnapshot } from '../progress.ts'
 
 export const inject = ['slots', 'sessions']
 
@@ -68,7 +72,7 @@ interface SendFeedbackResult {
 
 interface SessionActivity {
   subscribe(listener: () => void): () => void
-  getSnapshot(): { running?: boolean }
+  getSnapshot(): PageCraftSessionSnapshot
 }
 
 interface FrontendFeedbackPanelProps extends FrontendFeedbackInjected {
@@ -110,10 +114,12 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function useSessionRunning(activity: SessionActivity | null): boolean {
+const EMPTY_SESSION_SNAPSHOT: PageCraftSessionSnapshot = Object.freeze({ running: false, queue: [], runningCalls: [] })
+
+function useSessionSnapshot(activity: SessionActivity | null): PageCraftSessionSnapshot {
   const subscribe = useCallback((listener: () => void) => activity?.subscribe(listener) ?? (() => {}), [activity])
-  const getSnapshot = useCallback(() => activity?.getSnapshot().running === true, [activity])
-  return useSyncExternalStore(subscribe, getSnapshot, () => false)
+  const getSnapshot = useCallback(() => activity?.getSnapshot() ?? EMPTY_SESSION_SNAPSHOT, [activity])
+  return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SESSION_SNAPSHOT)
 }
 
 type SelectionMode = 'element' | 'area'
@@ -267,7 +273,8 @@ function FrontendFeedbackPanel({
 }: FrontendFeedbackPanelProps) {
   const hasSession = sendFeedback !== null
   const storageId = `${sessionId}:${workspaceMode}`
-  const agentRunning = useSessionRunning(sessionActivity)
+  const sessionSnapshot = useSessionSnapshot(sessionActivity)
+  const agentRunning = sessionSnapshot.running === true
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const previousAgentRunningRef = useRef(agentRunning)
   const refreshNoticeRef = useRef<string | null>(null)
@@ -276,6 +283,7 @@ function FrontendFeedbackPanel({
   const pendingAfterBatchIdRef = useRef<string | null>(null)
   const activeRollbackBatchIdRef = useRef<string | null>(null)
   const pendingRollbackBatchIdRef = useRef<string | null>(null)
+  const reconcileBusyRef = useRef(false)
   const historyStore = useMemo(() => new VisualHistoryStore(), [])
   const initialNavigation = useMemo(() => readPersistedPreviewNavigation(storageId), [storageId])
   const initialDraft = useMemo(() => readPersistedFeedbackDraft(storageId), [storageId])
@@ -313,9 +321,24 @@ function FrontendFeedbackPanel({
   const [showStudio, setShowStudio] = useState(false)
   const [studioBusy, setStudioBusy] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
+  const [clock, setClock] = useState(Date.now())
   const loadedUrl = currentPreviewUrl(navigation)
   const canGoBack = navigation.index > 0
   const canGoForward = navigation.index < navigation.entries.length - 1
+  const progressRecords = useMemo(() => history
+    .filter(record => ['capturing-before', 'queued', 'running', 'capturing-after', 'failed', 'completed'].includes(record.status))
+    .sort((a, b) => a.createdAt - b.createdAt), [history])
+  const activeProgressRecord = progressRecords.find(record => !['completed', 'failed'].includes(record.status))
+    ?? progressRecords[progressRecords.length - 1]
+  const activeProgress = activeProgressRecord === undefined
+    ? null
+    : deriveBatchProgress(activeProgressRecord, sessionSnapshot, progressRecords, clock)
+
+  useEffect(() => {
+    if (activeProgress === null || ['completed', 'failed'].includes(activeProgress.stage)) return
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [activeProgress?.batchId, activeProgress?.stage])
 
   const previewFrame = useMemo(() => {
     return resolvePreviewFrameLocation(loadedUrl, window.location.href, revision)
@@ -497,6 +520,37 @@ function FrontendFeedbackPanel({
   }, [agentRunning, historyStore, queued.length, refreshHistory, refreshPreview, selection, storageId])
 
   useEffect(() => {
+    if (reconcileBusyRef.current || pendingAfterBatchIdRef.current !== null) return
+    const unfinished = history
+      .filter(record => record.status === 'queued' || record.status === 'running')
+      .sort((a, b) => a.createdAt - b.createdAt)
+    if (unfinished.length === 0 || activeBatchIdRef.current !== null) return
+    const queue = sessionSnapshot.queue
+    const runningCandidate = unfinished.find(record => !queue?.some(item => (item.preview ?? '').includes(record.id)))
+
+    if (agentRunning && runningCandidate !== undefined) {
+      activeBatchIdRef.current = runningCandidate.id
+      if (runningCandidate.status === 'queued') {
+        reconcileBusyRef.current = true
+        void historyStore.put(transitionBatch(runningCandidate, 'running'))
+          .then(refreshHistory)
+          .finally(() => { reconcileBusyRef.current = false })
+      }
+      return
+    }
+
+    const staleRunning = unfinished.find(record => record.status === 'running')
+    if (!agentRunning && staleRunning !== undefined) {
+      reconcileBusyRef.current = true
+      pendingAfterBatchIdRef.current = staleRunning.id
+      void historyStore.put(transitionBatch(staleRunning, 'capturing-after'))
+        .then(refreshHistory)
+        .then(() => refreshPreview('正在恢复未结算的 PageCraft 批次…', 'Agent 已结束，正在捕获修改后页面。'))
+        .finally(() => { reconcileBusyRef.current = false })
+    }
+  }, [agentRunning, history, historyStore, refreshHistory, refreshPreview, sessionSnapshot.queue])
+
+  useEffect(() => {
     const listener = (event: MessageEvent<FeedbackMessage>) => {
       if (event.source !== iframeRef.current?.contentWindow) return
       if (isScreenshotCaptureResult(event.data)) {
@@ -625,8 +679,8 @@ function FrontendFeedbackPanel({
       if (event.data.payload.kind === 'area') setAreaOperation('insert')
       setComment('')
       setStatus(event.data.payload.kind === 'area'
-        ? `已框选 ${event.data.payload.rect.width} × ${event.data.payload.rect.height}px 区域，并记录四个顶点${event.data.payload.presentation === undefined ? '' : `（第 ${event.data.payload.presentation.slideIndex + 1} 页）`}。`
-        : `已选择 ${event.data.payload.selector}${event.data.payload.presentation === undefined ? '' : `（第 ${event.data.payload.presentation.slideIndex + 1} 页）`}`)
+        ? `已框选 ${event.data.payload.rect.width} × ${event.data.payload.rect.height}px 区域。请在右侧选择“新增内容 / 增加装饰 / 重新布局 / 加入交互”，再补充你想看到的结果。`
+        : `已选择 ${event.data.payload.selector}。右侧已按元素类型准备修改建议；点击建议生成草稿后，可继续细化内容、视觉、布局和交互要求。`)
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
@@ -766,7 +820,7 @@ function FrontendFeedbackPanel({
       const dataUrl = lastScreenshot?.dataUrl ?? before.dataUrl
       const image = dataUrl === undefined ? undefined : promptImageFromDataUrl(dataUrl, `pagecraft-${batch.id}-before.webp`)
       const result = await sendFeedback(buildAnnotationPrompt(enrichedComments, { mode: workspaceMode, batchId: batch.id }), image)
-      activeBatchIdRef.current = batch.id
+      if (!agentRunning && activeBatchIdRef.current === null) activeBatchIdRef.current = batch.id
       setQueued([])
       setSelection(null)
       setAreaOperation('insert')
@@ -806,7 +860,7 @@ function FrontendFeedbackPanel({
       await refreshHistory()
       const image = before.dataUrl === undefined ? undefined : promptImageFromDataUrl(before.dataUrl, `pagecraft-${batch.id}-before.webp`)
       const result = await sendFeedback(buildPrompt(batch.id), image)
-      activeBatchIdRef.current = batch.id
+      if (!agentRunning && activeBatchIdRef.current === null) activeBatchIdRef.current = batch.id
       setShowStudio(false)
       setStatus(`${kind === 'theme' ? '主题' : '动效'}工单已发送${result.warning === undefined ? '' : `；截图降级：${result.warning}`}`)
     } catch (error) {
@@ -1003,6 +1057,17 @@ function FrontendFeedbackPanel({
             </div>
           </div>
 
+          {activeProgress !== null ? (
+            <ProgressTimeline
+              progress={activeProgress}
+              onHistory={() => {
+                setSelectedHistoryId(activeProgress.batchId)
+                setShowHistory(true)
+              }}
+              onRefresh={() => refreshPreview('正在刷新最新页面…', '预览已刷新，可继续评注。')}
+            />
+          ) : null}
+
           <div style={styles.sidebarScroller}>
             <div style={styles.scrollArea}>
               {queued.map((item, index) => (
@@ -1068,17 +1133,16 @@ function FrontendFeedbackPanel({
                     <span style={styles.operationHelp}>{AREA_OPERATIONS.find(option => option.value === areaOperation)?.description}</span>
                   </div>
                 ) : null}
-                <textarea
-                  autoFocus
-                  value={comment}
-                  onChange={event => setComment(event.target.value)}
-                  onKeyDown={event => {
-                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') queueCurrent()
+                <GuidanceEditor
+                  selection={selection}
+                  context={{
+                    viewport: { id: viewport.id, label: viewport.label, width: viewport.width, height: viewport.height },
+                    scope: responsiveScope,
+                    ...(selection.kind === 'area' ? { areaOperation } : {}),
                   }}
-                  placeholder={selection.kind === 'area'
-                    ? '说明希望在这个区域新增什么，例如“新增一个统计卡片，与左侧卡片顶边对齐”…'
-                    : '说明希望怎样修改这个元素…'}
-                  style={styles.textarea}
+                  value={comment}
+                  onChange={setComment}
+                  onQueue={queueCurrent}
                 />
                 <div style={styles.composerActions}>
                   <button
