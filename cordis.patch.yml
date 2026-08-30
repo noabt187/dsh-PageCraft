@@ -4,4 +4,6 @@
       config:
         allowRemoteHosts: true
         maxHtmlBytes: 5242880
+        maxDocumentBytes: 26214400
+        maxExtractedTextCharacters: 2000000
         requestTimeoutMs: 15000

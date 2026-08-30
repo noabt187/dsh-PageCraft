@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  buildPresentationCreationPrompt,
+  buildPresentationDocumentPrompt,
+  buildPresentationOutlinePrompt,
   resolvePresentationSlides,
 } from '../presentation.ts'
-import type { PageCraftMode, PresentationBrief, PresentationSlideSummary } from '../presentation.ts'
+import type {
+  PageCraftMode,
+  PresentationDocumentBrief,
+  PresentationSlideSummary,
+  PresentationSourceSummary,
+} from '../presentation.ts'
 import {
   buildAnnotationPrompt,
   cornersFromRect,
@@ -23,7 +29,7 @@ import {
   resolvePreviewFrameLocation,
 } from '../shared.ts'
 import type { AreaOperation, FeedbackComment, FeedbackDraftState, FeedbackSelection, PreviewNavigationState } from '../shared.ts'
-import { PresentationBriefDialog, SlideRail } from './presentation.tsx'
+import { PresentationDocumentDialog, SlideRail } from './presentation.tsx'
 
 export const inject = ['slots', 'sessions']
 
@@ -416,18 +422,34 @@ function FrontendFeedbackPanel({
     setActiveSlideId(slideId)
   }
 
-  const createPresentation = async (brief: PresentationBrief) => {
+  async function requestPresentationOutline(
+    source: PresentationSourceSummary,
+    brief: PresentationDocumentBrief,
+  ): Promise<void> {
     if (sendFeedback === null) {
-      setStatus('当前还没有会话，请先发送一条消息创建会话，再新建演示文稿。')
-      return
+      throw new Error('当前还没有会话，请先发送一条消息创建会话。')
     }
     setCreatingPresentation(true)
     try {
-      await sendFeedback(buildPresentationCreationPrompt(brief))
-      setShowPresentationBrief(false)
-      setStatus('已把演示文稿需求发送给 Agent。完成后请在地址栏打开 Agent 提供的预览 URL。')
+      await sendFeedback(buildPresentationOutlinePrompt(source, brief))
+      setStatus('文档已解析，Agent 正在生成可调整的演示文稿目录。')
     } catch (error) {
-      setStatus(`创建请求发送失败：${describeError(error)}`)
+      setStatus(`目录请求发送失败：${describeError(error)}`)
+      throw error
+    } finally {
+      setCreatingPresentation(false)
+    }
+  }
+
+  async function requestPresentationGeneration(source: PresentationSourceSummary): Promise<void> {
+    if (sendFeedback === null) throw new Error('当前还没有会话，请先发送一条消息创建会话。')
+    setCreatingPresentation(true)
+    try {
+      await sendFeedback(buildPresentationDocumentPrompt(source))
+      setStatus('目录已经确认，Agent 正在分批生成幻灯片。可在生成窗口查看进度。')
+    } catch (error) {
+      setStatus(`生成请求发送失败：${describeError(error)}`)
+      throw error
     } finally {
       setCreatingPresentation(false)
     }
@@ -509,7 +531,7 @@ function FrontendFeedbackPanel({
           />
           <button type="button" onClick={openPreview} style={styles.secondaryButton}>打开</button>
           {workspaceMode === 'presentation' ? (
-            <button type="button" onClick={() => setShowPresentationBrief(true)} style={styles.createPresentationButton}>新建演示文稿</button>
+            <button type="button" onClick={() => setShowPresentationBrief(true)} style={styles.createPresentationButton}>上传文档生成</button>
           ) : null}
           <button
             type="button"
@@ -687,10 +709,13 @@ function FrontendFeedbackPanel({
         </aside>
       </div>
       {showPresentationBrief ? (
-        <PresentationBriefDialog
+        <PresentationDocumentDialog
+          sessionId={sessionId}
           submitting={creatingPresentation}
           onCancel={() => setShowPresentationBrief(false)}
-          onSubmit={(brief) => { void createPresentation(brief) }}
+          onRequestOutline={requestPresentationOutline}
+          onRequestGeneration={requestPresentationGeneration}
+          onPreviewReady={(url) => navigatePreview(url, '演示文稿预览地址已就绪，正在打开…')}
         />
       ) : null}
     </div>
