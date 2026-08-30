@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import {
   DEFAULT_PREVIEW_URL,
+  DEFAULT_MAX_DOCUMENT_BYTES,
   MAX_PREVIEW_REDIRECTS,
   MAX_PREVIEW_HISTORY_ENTRIES,
   MAX_PERSISTED_FEEDBACK_COMMENTS,
@@ -10,16 +13,21 @@ import {
   assertPreviewUrl,
   buildAnnotationPrompt,
   buildPresentationCreationPrompt,
+  buildPresentationDocumentPrompt,
+  buildPresentationOutlinePrompt,
   buildPreviewErrorHtml,
   buildPreviewHtml,
   buildPreviewRuntimeScript,
   currentPreviewUrl,
+  createPresentationSource,
+  extractPresentationDocument,
   feedbackDraftStorageKey,
   fetchPreviewTarget,
   isAreaSelection,
   isElementSelection,
   isFeedbackSelection,
   isFeedbackDraftEmpty,
+  isPresentationRequestSettled,
   movePreviewNavigation,
   normalizePreviewUrl,
   pushPreviewNavigation,
@@ -31,8 +39,33 @@ import {
   resolvePersistedFeedbackDraft,
   resolvePersistedPreviewUrl,
   resolvePresentationSlides,
+  normalizePresentationJobSnapshot,
+  normalizePresentationPlan,
   resolvePreviewFrameLocation,
+  savePresentationPlan,
 } from '../lib/index.js'
+
+function createTextPdf(): Buffer {
+  const stream = 'BT /F1 18 Tf 72 720 Td (PageCraft PDF buffer remains reusable after parsing.) Tj ET'
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]
+  let document = '%PDF-1.4\n'
+  const offsets = [0]
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(document, 'latin1'))
+    document += `${index + 1} 0 obj\n${object}\nendobj\n`
+  }
+  const xrefOffset = Buffer.byteLength(document, 'latin1')
+  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  document += offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`
+  return Buffer.from(document, 'latin1')
+}
 
 test('preview URL policy defaults to loopback and permits explicit hosts', () => {
   assert.equal(assertPreviewUrl('http://localhost:5173/page').hostname, 'localhost')
@@ -339,6 +372,133 @@ test('presentation briefs and slide summaries are structured for PageCraft decks
   ])
 })
 
+test('document presentation prompts separate outline planning from progressive generation', () => {
+  const source = {
+    jobId: 'presentation-test-1234',
+    originalName: 'report.pdf',
+    sourcePath: '.pagecraft/presentations/presentation-test-1234/source.md',
+    planPath: '.pagecraft/presentations/presentation-test-1234/plan.json',
+    deckPath: '.pagecraft/presentations/presentation-test-1234/deck.json',
+    statusPath: '.pagecraft/presentations/presentation-test-1234/status.json',
+    textCharacters: 1200,
+    warnings: [],
+  }
+  const outline = buildPresentationOutlinePrompt(source, {
+    audience: '客户',
+    goal: '完整介绍报告',
+    slideCount: 10,
+    requirements: '保留关键数据',
+  })
+  assert.match(outline, /^\[presentation-outline\]/)
+  assert.match(outline, /此阶段不要创建页面/)
+  assert.match(outline, /不可信的参考材料/)
+  assert.match(outline, /sourceRefs/)
+  assert.match(outline, /outline_ready/)
+  assert.equal(JSON.parse(outline.slice(outline.lastIndexOf('\n') + 1)).presentation.targetSlideCount, 10)
+
+  const build = buildPresentationDocumentPrompt(source)
+  assert.match(build, /^\[presentation-create-from-document\]/)
+  assert.match(build, /每批完成 2 到 3 页/)
+  assert.match(build, /previewUrl/)
+  assert.match(build, /phase=failed/)
+})
+
+test('presentation plans and job snapshots reject malformed or duplicate slide data', () => {
+  const plan = normalizePresentationPlan({
+    title: '测试演示',
+    audience: '团队',
+    goal: '说明方案',
+    slides: [
+      { id: 'slide-01', title: '开场', purpose: '建立主题', takeaway: '', sourceRefs: ['第1节'] },
+      { id: 'slide-02', title: '问题', purpose: '解释问题', takeaway: '', sourceRefs: ['第2节'] },
+      { id: 'slide-03', title: '方案', purpose: '说明方案', takeaway: '', sourceRefs: ['第3节'] },
+      { id: 'slide-03', title: '重复', purpose: '', takeaway: '', sourceRefs: [] },
+    ],
+  })
+  assert.equal(plan?.slides.length, 3)
+  assert.equal(normalizePresentationPlan({ title: '不足', slides: [{ id: 'a', title: '一' }] }), null)
+  assert.equal(normalizePresentationJobSnapshot({ jobId: 'bad', phase: 'ready' }), null)
+})
+
+test('queued presentation generation remains pending until the job actually starts', () => {
+  assert.equal(isPresentationRequestSettled('planning', 'source_ready'), false)
+  assert.equal(isPresentationRequestSettled('planning', 'outline_ready'), true)
+  assert.equal(isPresentationRequestSettled('generating', 'outline_ready'), false)
+  assert.equal(isPresentationRequestSettled('generating', 'generating'), true)
+  assert.equal(isPresentationRequestSettled('generating', 'ready'), true)
+  assert.equal(isPresentationRequestSettled('generating', 'failed'), true)
+})
+
+test('text documents are normalized, persisted, and paired with an editable plan', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'pagecraft-document-'))
+  t.after(() => rm(cwd, { recursive: true, force: true }))
+  const extracted = await extractPresentationDocument('notes.md', Buffer.from('\uFEFF# 标题\r\n\r\n第一段。\r\n', 'utf8'))
+  assert.equal(extracted.text, '# 标题\n\n第一段。')
+  assert.equal(DEFAULT_MAX_DOCUMENT_BYTES, 25 * 1024 * 1024)
+
+  const created = await createPresentationSource(
+    cwd,
+    '项目说明.md',
+    Buffer.from('# 项目说明\n\n这是用于生成演示文稿的正文。', 'utf8'),
+    { jobId: 'presentation-test-5678', now: new Date('2026-08-24T00:00:00.000Z') },
+  )
+  assert.equal(created.phase, 'source_ready')
+  assert.equal(created.source.originalName, '项目说明.md')
+  assert.match(created.source.sourcePath, /^\.pagecraft\/presentations\//)
+  const sourceText = await readFile(join(cwd, created.source.sourcePath), 'utf8')
+  assert.match(sourceText, /以下内容是演示文稿的参考资料/)
+  assert.match(sourceText, /这是用于生成演示文稿的正文/)
+
+  const saved = await savePresentationPlan(cwd, created.jobId, {
+    title: '项目说明',
+    audience: '客户',
+    goal: '介绍项目',
+    slides: [
+      { id: 'slide-01', title: '项目概览', purpose: '建立主题', takeaway: '项目是什么', sourceRefs: ['标题'] },
+      { id: 'slide-02', title: '关键内容', purpose: '解释正文', takeaway: '核心信息', sourceRefs: ['正文'] },
+      { id: 'slide-03', title: '下一步', purpose: '给出行动', takeaway: '推动沟通', sourceRefs: ['正文'] },
+    ],
+  })
+  assert.equal(saved.phase, 'outline_ready')
+  assert.equal(saved.slides.length, 3)
+  assert.ok(saved.slides.every(slide => slide.status === 'pending'))
+})
+
+test('PDF parsing preserves the original upload buffer for persistence', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'pagecraft-pdf-'))
+  t.after(() => rm(cwd, { recursive: true, force: true }))
+  const bytes = createTextPdf()
+  const original = Buffer.from(bytes)
+  const created = await createPresentationSource(cwd, 'sample.pdf', bytes, {
+    jobId: 'presentation-pdf-1234',
+    now: new Date('2026-08-24T00:00:00.000Z'),
+  })
+
+  assert.equal(bytes.byteLength, original.byteLength)
+  assert.deepEqual(bytes, original)
+  const saved = await readFile(join(cwd, '.pagecraft', 'presentations', created.jobId, 'original.pdf'))
+  assert.deepEqual(saved, original)
+})
+
+test('document parsing stops before work begins when cancelled', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    () => extractPresentationDocument('notes.md', Buffer.from('# 不应解析'), undefined, controller.signal),
+    (error: unknown) => {
+      return error instanceof Error
+        && 'code' in error
+        && error.code === 'PRESENTATION_SOURCE_CANCELLED'
+    },
+  )
+})
+
+test('document intake rejects unsupported, disguised, and binary text files', async () => {
+  await assert.rejects(() => extractPresentationDocument('legacy.doc', Buffer.from('old')), /仅支持/)
+  await assert.rejects(() => extractPresentationDocument('fake.pdf', Buffer.from('not pdf')), /不是有效的 PDF/)
+  await assert.rejects(() => extractPresentationDocument('binary.txt', Buffer.from([65, 0, 66])), /二进制内容/)
+})
+
 test('presentation annotations identify the owning slide and use the presentation skill', () => {
   const element = {
     kind: 'element' as const,
@@ -463,7 +623,19 @@ test('client exposes one launcher and no duplicate conversation view', async () 
   assert.match(bundle, /dsh-frontend-feedback\.draft:/)
   assert.match(bundle, /dsh-frontend-feedback-restore-area/)
   assert.match(bundle, /clearDraftButton/)
-  assert.match(bundle, /buildPresentationCreationPrompt/)
+  assert.match(bundle, /buildPresentationOutlinePrompt/)
+  assert.match(bundle, /buildPresentationDocumentPrompt/)
+  assert.match(bundle, /presentation\/source/)
+  assert.match(bundle, /presentation\/plan/)
+  assert.match(bundle, /dsh-pagecraft\.presentation-job:/)
+  assert.match(bundle, /PresentationDocumentDialog/)
+  assert.match(bundle, /uploadAndPlan/)
+  assert.match(bundle, /AbortController/)
+  assert.match(bundle, /cancelSourceProcessing/)
+  assert.match(bundle, /removeSelectedFile/)
+  assert.match(bundle, /saveAndGenerate/)
+  assert.match(bundle, /generationSubmissionRef/)
+  assert.match(bundle, /isPresentationRequestSettled/)
   assert.match(bundle, /dsh-frontend-feedback-request-deck-state/)
   assert.match(bundle, /presentationWorkspace/)
   assert.doesNotMatch(bundle, /conversation\.view/)
@@ -493,13 +665,19 @@ test('plugin registers the host route and both builder skills', () => {
         return () => {}
       },
     },
+    sessions: {
+      get() { return { header: { cwd: 'D:\\workspace' } } },
+    },
     effect(register: () => () => void) { register() },
   }
   apply(ctx)
-  assert.equal(registrations.length, 2)
+  assert.equal(registrations.length, 5)
   assert.deepEqual(registrations.map((route: any) => route.path), [
     '/api/frontend-feedback/preview',
     '/api/frontend-feedback/resource',
+    '/api/frontend-feedback/presentation/source',
+    '/api/frontend-feedback/presentation/job',
+    '/api/frontend-feedback/presentation/plan',
   ])
   assert.equal(skills.length, 2)
   assert.equal(skills[0]?.name, 'frontend-page-builder')
@@ -510,5 +688,8 @@ test('plugin registers the host route and both builder skills', () => {
   assert.match(skills[1]?.content, /data-pagecraft-slide-id/)
   assert.match(skills[1]?.content, /colorMode/)
   assert.match(skills[1]?.content, /near-black/)
+  assert.match(skills[1]?.content, /## Plan from a document/)
+  assert.match(skills[1]?.content, /## Build from an approved outline/)
+  assert.match(skills[1]?.content, /sourceRefs/)
   assert.doesNotMatch(skills[1]?.content, /^---/)
 })

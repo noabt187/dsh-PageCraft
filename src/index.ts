@@ -2,6 +2,21 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import skillMarkdown from '../skills/frontend-page-builder/SKILL.md'
 import presentationSkillMarkdown from '../skills/presentation-builder/SKILL.md'
 import {
+  DEFAULT_MAX_DOCUMENT_BYTES,
+  DEFAULT_MAX_EXTRACTED_TEXT_CHARACTERS,
+  PresentationDocumentError,
+  createPresentationSource,
+  parsePlanRequestBody,
+  readPresentationJob,
+  readRequestBodyWithLimit,
+  savePresentationPlan,
+} from './document.ts'
+import {
+  PRESENTATION_JOB_PATH,
+  PRESENTATION_PLAN_PATH,
+  PRESENTATION_SOURCE_PATH,
+} from './presentation.ts'
+import {
   PREVIEW_RESOURCE_PATH,
   PreviewRedirectError,
   assertPreviewUrl,
@@ -13,13 +28,15 @@ import {
 } from './preview.ts'
 
 export const name = 'frontend-feedback'
-export const inject = ['webServer', 'skills']
+export const inject = ['webServer', 'skills', 'sessions']
 
 export interface Config {
   allowRemoteHosts?: boolean
   allowedHosts?: string[]
   maxHtmlBytes?: number
   maxResourceBytes?: number
+  maxDocumentBytes?: number
+  maxExtractedTextCharacters?: number
   requestTimeoutMs?: number
 }
 
@@ -40,14 +57,22 @@ interface PluginContext {
       content: string
     }): () => void
   }
+  sessions: {
+    get(sessionId: string): { header: { cwd?: string } } | undefined
+  }
   effect(register: () => (() => void), label: string): void
+}
+
+interface PresentationRequestContext {
+  requestUrl: URL
+  cwd: string
 }
 
 const DEFAULT_MAX_HTML_BYTES = 5 * 1024 * 1024
 const DEFAULT_MAX_RESOURCE_BYTES = 20 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 15_000
 const SKILL_DESCRIPTION = 'Build or redesign polished frontend pages and components, then refine them from [frontend-feedback] DOM or area annotations. Use for initial UI implementation, visual/layout work, responsive behavior, accessibility, selector-specific iteration, or adding content inside a user-drawn region.'
-const PRESENTATION_SKILL_DESCRIPTION = 'Create and refine browser-based HTML/React presentations from [presentation-create] briefs and [presentation-feedback] slide annotations, using coherent story structure, reusable layouts, stable PageCraft slide IDs, themes, and visual verification.'
+const PRESENTATION_SKILL_DESCRIPTION = 'Plan, create, and refine browser-based HTML/React presentations from [presentation-outline] document sources, [presentation-create-from-document] approved plans, [presentation-create] briefs, and [presentation-feedback] annotations, using source-grounded story structure, progressive status, reusable layouts, stable PageCraft slide IDs, themes, and visual verification.'
 
 function markdownBody(source: string): string {
   return source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
@@ -232,6 +257,132 @@ async function handlePreviewResource(req: IncomingMessage, res: ServerResponse, 
   }
 }
 
+function sendJson(res: ServerResponse, status: number, value: unknown): void {
+  if (res.destroyed || res.writableEnded) return
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+  })
+  res.end(`${JSON.stringify(value)}\n`)
+}
+
+interface RequestCancellation {
+  signal: AbortSignal
+  dispose(): void
+}
+
+function trackRequestCancellation(req: IncomingMessage, res: ServerResponse): RequestCancellation {
+  const controller = new AbortController()
+
+  function abortRequest(): void {
+    controller.abort()
+  }
+
+  function abortClosedResponse(): void {
+    if (!res.writableEnded) abortRequest()
+  }
+
+  req.once('aborted', abortRequest)
+  res.once('close', abortClosedResponse)
+  return {
+    signal: controller.signal,
+    dispose() {
+      req.off('aborted', abortRequest)
+      res.off('close', abortClosedResponse)
+    },
+  }
+}
+
+function sendPresentationError(res: ServerResponse, error: unknown): void {
+  if (error instanceof PresentationDocumentError) {
+    sendJson(res, error.status, { error: { code: error.code, message: error.message } })
+    return
+  }
+  sendJson(res, 500, { error: { code: 'PRESENTATION_INTERNAL_ERROR', message: describeError(error) } })
+}
+
+function rejectUnsupportedMethod(
+  req: IncomingMessage,
+  res: ServerResponse,
+  allowedMethod: 'GET' | 'POST',
+): boolean {
+  if (req.method === allowedMethod) return false
+  res.setHeader('allow', allowedMethod)
+  sendJson(res, 405, { error: { code: 'METHOD_NOT_ALLOWED', message: `只支持 ${allowedMethod}` } })
+  return true
+}
+
+function presentationRequest(req: IncomingMessage, ctx: PluginContext): PresentationRequestContext {
+  const requestUrl = new URL(req.url ?? '/', 'http://localhost')
+  const sessionId = requestUrl.searchParams.get('sessionId')?.trim() ?? ''
+  if (sessionId.length === 0 || sessionId.length > 200) {
+    throw new PresentationDocumentError('缺少有效的 sessionId', 400, 'SESSION_ID_REQUIRED')
+  }
+  const session = ctx.sessions.get(sessionId)
+  if (session === undefined) throw new PresentationDocumentError('当前会话不存在或尚未连接', 404, 'SESSION_NOT_FOUND')
+  const cwd = session.header.cwd
+  if (cwd === undefined || cwd.trim().length === 0) {
+    throw new PresentationDocumentError('当前会话没有工作目录，无法保存演示文稿资料', 409, 'SESSION_CWD_REQUIRED')
+  }
+  return { requestUrl, cwd }
+}
+
+async function handlePresentationSource(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: PluginContext,
+  config: Config,
+): Promise<void> {
+  if (rejectUnsupportedMethod(req, res, 'POST')) return
+  const cancellation = trackRequestCancellation(req, res)
+  try {
+    const { requestUrl, cwd } = presentationRequest(req, ctx)
+    const fileName = requestUrl.searchParams.get('filename')?.trim() ?? ''
+    if (fileName.length === 0) throw new PresentationDocumentError('缺少文件名', 400, 'FILE_NAME_REQUIRED')
+    const body = await readRequestBodyWithLimit(
+      req,
+      config.maxDocumentBytes ?? DEFAULT_MAX_DOCUMENT_BYTES,
+      cancellation.signal,
+    )
+    const snapshot = await createPresentationSource(cwd, fileName, body, {
+      maxTextCharacters: config.maxExtractedTextCharacters ?? DEFAULT_MAX_EXTRACTED_TEXT_CHARACTERS,
+      signal: cancellation.signal,
+    })
+    sendJson(res, 201, snapshot)
+  } catch (error) {
+    sendPresentationError(res, error)
+  } finally {
+    cancellation.dispose()
+  }
+}
+
+async function handlePresentationJob(req: IncomingMessage, res: ServerResponse, ctx: PluginContext): Promise<void> {
+  if (rejectUnsupportedMethod(req, res, 'GET')) return
+  try {
+    const { requestUrl, cwd } = presentationRequest(req, ctx)
+    const jobId = requestUrl.searchParams.get('jobId')?.trim() ?? ''
+    const snapshot = await readPresentationJob(cwd, jobId)
+    sendJson(res, 200, snapshot)
+  } catch (error) {
+    sendPresentationError(res, error)
+  }
+}
+
+async function handlePresentationPlan(req: IncomingMessage, res: ServerResponse, ctx: PluginContext): Promise<void> {
+  if (rejectUnsupportedMethod(req, res, 'POST')) return
+  try {
+    const { requestUrl, cwd } = presentationRequest(req, ctx)
+    const jobId = requestUrl.searchParams.get('jobId')?.trim() ?? ''
+    const body = await readRequestBodyWithLimit(req, 1024 * 1024)
+    const plan = parsePlanRequestBody(body)
+    const snapshot = await savePresentationPlan(cwd, jobId, plan)
+    sendJson(res, 200, snapshot)
+  } catch (error) {
+    sendPresentationError(res, error)
+  }
+}
+
 export function apply(ctx: PluginContext, config: Config = {}): void {
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -244,6 +395,24 @@ export function apply(ctx: PluginContext, config: Config = {}): void {
     path: PREVIEW_RESOURCE_PATH,
     handler: (req, res) => handlePreviewResource(req, res, config),
   }), 'frontend-feedback: preview resource route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PRESENTATION_SOURCE_PATH,
+    handler: (req, res) => handlePresentationSource(req, res, ctx, config),
+  }), 'frontend-feedback: presentation source route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PRESENTATION_JOB_PATH,
+    handler: (req, res) => handlePresentationJob(req, res, ctx),
+  }), 'frontend-feedback: presentation job route')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PRESENTATION_PLAN_PATH,
+    handler: (req, res) => handlePresentationPlan(req, res, ctx),
+  }), 'frontend-feedback: presentation plan route')
 
   ctx.skills.register({
     name: 'frontend-page-builder',
@@ -303,8 +472,30 @@ export {
   resolvePreviewFrameLocation,
 } from './shared.ts'
 export {
+  DEFAULT_MAX_DOCUMENT_BYTES,
+  DEFAULT_MAX_EXTRACTED_TEXT_CHARACTERS,
+  SUPPORTED_PRESENTATION_DOCUMENT_EXTENSIONS,
+  PresentationDocumentError,
+  createPresentationSource,
+  extractPresentationDocument,
+  parsePlanRequestBody,
+  readPresentationJob,
+  readRequestBodyWithLimit,
+  savePresentationPlan,
+} from './document.ts'
+export {
   DEFAULT_PRESENTATION_BRIEF,
+  DEFAULT_PRESENTATION_DOCUMENT_BRIEF,
   buildPresentationCreationPrompt,
+  buildPresentationDocumentPrompt,
+  buildPresentationOutlinePrompt,
+  isPresentationJobId,
+  isPresentationRequestSettled,
   isPresentationSlideSummary,
+  normalizePresentationJobSnapshot,
+  normalizePresentationPlan,
+  PRESENTATION_JOB_PATH,
+  PRESENTATION_PLAN_PATH,
+  PRESENTATION_SOURCE_PATH,
   resolvePresentationSlides,
 } from './presentation.ts'

@@ -57,12 +57,13 @@ Area annotations support three explicit layout intents:
 
 ### Build and refine a presentation
 
-1. Switch PageCraft to **Presentation** and choose **New presentation**.
-2. Provide the title, audience, goal, slide count, visual style, and color mode.
-3. The Agent uses the bundled `presentation-builder` Skill to create a browser-based deck.
-4. Open the reported preview URL. PageCraft discovers the slides and lets you annotate each one by element or region.
+1. Switch PageCraft to **Presentation** and choose **Generate from document**.
+2. Upload a PDF, DOCX, Markdown, or TXT file, or paste source text. Add the intended audience, target slide count, and speaking goal.
+3. PageCraft extracts the source into the workspace. The Agent creates an editable outline first; reorder, rename, add, or remove slides before approving it.
+4. After approval, the Agent generates slides in small batches. PageCraft persists the job, displays per-slide progress, and opens the preview URL as soon as it is available.
+5. PageCraft discovers the rendered slides and lets you refine each one with DOM or adjustable-region annotations.
 
-New decks default to a light visual system unless you explicitly choose an inherited or dark theme. The current presentation workflow targets interactive HTML/React decks; PPTX/PDF export is not implemented yet.
+Document content is stored under `.pagecraft/presentations/` in the active workspace instead of being copied wholesale into one prompt. New decks use a restrained light visual system by default. The current workflow targets interactive HTML/React decks; PPTX/PDF export is not implemented yet.
 
 ## What the Agent receives
 
@@ -162,6 +163,7 @@ Run `npm run build` after source changes and refresh Harness. `npm run check` bu
 - PageCraft works best with local development servers and applications you control.
 - Authentication, target-domain cookies, strict CSP, Service Workers, file uploads, POST navigation, and some cross-origin modules may not work in the isolated preview.
 - External sites may deliberately block embedding, automation, or proxied resources.
+- Document import supports PDF, DOCX, Markdown, and UTF-8 text up to 25 MB. Scanned PDFs require OCR and are rejected in this version.
 - Presentation mode currently creates and refines browser-based decks; native PPTX/PDF export and master-slide editing are future work.
 
 ## Roadmap
