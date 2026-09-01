@@ -1,4 +1,7 @@
 import type { PageCraftMode } from './presentation.ts'
+import type { DomTextSelection } from './workspace.ts'
+
+export type SelectionMode = 'element' | 'area' | 'text'
 
 export interface SelectionPoint {
   x: number
@@ -19,6 +22,8 @@ export interface ElementSelection {
   selector: string
   domPath: string
   text: string
+  textKey?: string
+  editableText?: string
   html?: string
   container?: DomSnapshot
   rect: SelectionRect
@@ -438,6 +443,8 @@ export function isElementSelection(value: unknown): value is ElementSelection {
     && typeof item.selector === 'string'
     && typeof item.domPath === 'string'
     && typeof item.text === 'string'
+    && (item.textKey === undefined || typeof item.textKey === 'string')
+    && (item.editableText === undefined || typeof item.editableText === 'string')
     && (item.html === undefined || typeof item.html === 'string')
     && (item.container === undefined || isDomSnapshot(item.container))
     && (item.presentation === undefined || isPresentationContext(item.presentation))
@@ -477,6 +484,30 @@ function isPresentationContext(value: unknown): value is PresentationContext {
     && typeof item.slideTitle === 'string'
     && Number.isInteger(item.slideIndex)
     && Number(item.slideIndex) >= 0
+}
+
+export function isDomTextSelection(value: unknown): value is DomTextSelection {
+  if (value === null || typeof value !== 'object') return false
+  const item = value as Partial<DomTextSelection>
+  if (typeof item.pageUrl !== 'string'
+    || !Array.isArray(item.framePath)
+    || item.framePath.length > 8
+    || !item.framePath.every(value => Number.isInteger(value) && value >= 0)
+    || typeof item.selector !== 'string'
+    || typeof item.fingerprint !== 'string'
+    || typeof item.displayedText !== 'string'
+    || typeof item.tagName !== 'string'
+    || item.attributes === null
+    || typeof item.attributes !== 'object'
+    || Array.isArray(item.attributes)
+    || !Array.isArray(item.nearbyText)
+    || item.nearbyText.length > 4
+    || !item.nearbyText.every(text => typeof text === 'string')) return false
+  if (item.displayedText.length > 2_000 || item.selector.length > 1_000 || item.fingerprint.length > 1_000) return false
+  if (item.slideId !== undefined && typeof item.slideId !== 'string') return false
+  if (item.textKey !== undefined && typeof item.textKey !== 'string') return false
+  return Object.entries(item.attributes).length <= 8
+    && Object.entries(item.attributes).every(([name, content]) => name.length <= 80 && typeof content === 'string' && content.length <= 500)
 }
 
 function isAreaGuide(value: unknown): value is AreaAlignmentGuide {

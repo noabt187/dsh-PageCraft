@@ -242,7 +242,7 @@ function presentationRoot(cwd: string): string {
   return resolve(cwd, '.pagecraft', 'presentations')
 }
 
-function presentationJobDirectory(cwd: string, jobId: string): string {
+export function resolvePresentationJobDirectory(cwd: string, jobId: string): string {
   if (!isPresentationJobId(jobId)) throw new PresentationDocumentError('演示任务 ID 无效')
   const root = presentationRoot(cwd)
   const directory = resolve(root, jobId)
@@ -293,7 +293,7 @@ export async function createPresentationSource(
   throwIfCancelled(options.signal)
   const now = options.now ?? new Date()
   const jobId = options.jobId ?? `presentation-${now.getTime().toString(36)}-${randomUUID().slice(0, 8)}`
-  const directory = presentationJobDirectory(cwd, jobId)
+  const directory = resolvePresentationJobDirectory(cwd, jobId)
   const originalPath = join(directory, `original${extracted.extension === '.markdown' ? '.md' : extracted.extension}`)
   const sourcePath = join(directory, 'source.md')
   const sourceJsonPath = join(directory, 'source.json')
@@ -342,7 +342,7 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 export async function readPresentationJob(cwd: string, jobId: string): Promise<PresentationJobSnapshot> {
-  const directory = presentationJobDirectory(cwd, jobId)
+  const directory = resolvePresentationJobDirectory(cwd, jobId)
   const source = await readJson(join(directory, 'source.json'))
   const status = await readJson(join(directory, 'status.json'))
   let plan: unknown
@@ -366,7 +366,7 @@ export async function savePresentationPlan(cwd: string, jobId: string, value: un
   const plan = normalizePresentationPlan(value)
   if (plan === null) throw new PresentationDocumentError('目录格式无效：至少需要 3 张标题完整、ID 唯一的幻灯片', 400, 'PLAN_INVALID')
   const current = await readPresentationJob(cwd, jobId)
-  const directory = presentationJobDirectory(cwd, jobId)
+  const directory = resolvePresentationJobDirectory(cwd, jobId)
   const updated: PresentationJobSnapshot = {
     ...current,
     phase: 'outline_ready',

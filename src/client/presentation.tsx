@@ -8,6 +8,7 @@ import {
   isPresentationRequestSettled,
   normalizePresentationJobSnapshot,
   normalizePresentationPlan,
+  presentationJobStorageKey,
 } from '../presentation.ts'
 import type {
   PresentationDocumentBrief,
@@ -26,6 +27,7 @@ interface PresentationDocumentDialogProps {
   onRequestOutline(source: PresentationSourceSummary, brief: PresentationDocumentBrief): Promise<void>
   onRequestGeneration(source: PresentationSourceSummary): Promise<void>
   onPreviewReady(url: string): void
+  onJobChange(jobId: string | null): void
 }
 
 interface SlideRailProps {
@@ -123,13 +125,9 @@ function responseErrorMessage(value: unknown, status: number): string {
   return error.message
 }
 
-function jobStorageKey(sessionId: string): string {
-  return `dsh-pagecraft.presentation-job:${sessionId}`
-}
-
 function persistedJobId(sessionId: string): string | null {
   try {
-    return window.localStorage.getItem(jobStorageKey(sessionId))
+    return window.localStorage.getItem(presentationJobStorageKey(sessionId))
   } catch {
     return null
   }
@@ -137,8 +135,8 @@ function persistedJobId(sessionId: string): string | null {
 
 function persistJobId(sessionId: string, jobId: string | null): void {
   try {
-    if (jobId === null) window.localStorage.removeItem(jobStorageKey(sessionId))
-    else window.localStorage.setItem(jobStorageKey(sessionId), jobId)
+    if (jobId === null) window.localStorage.removeItem(presentationJobStorageKey(sessionId))
+    else window.localStorage.setItem(presentationJobStorageKey(sessionId), jobId)
   } catch {
     // Job files remain durable in the workspace even when browser storage is unavailable.
   }
@@ -199,6 +197,7 @@ export function PresentationDocumentDialog({
   onRequestOutline,
   onRequestGeneration,
   onPreviewReady,
+  onJobChange,
 }: PresentationDocumentDialogProps): ReactElement {
   const [brief, setBrief] = useState<PresentationDocumentBrief>({ ...DEFAULT_PRESENTATION_DOCUMENT_BRIEF })
   const [file, setFile] = useState<File | null>(null)
@@ -227,6 +226,7 @@ export function PresentationDocumentDialog({
     const next = normalizePresentationJobSnapshot(value)
     if (next === null) throw new Error('服务器返回了无法识别的演示任务状态')
     setSnapshot(next)
+    onJobChange(next.jobId)
     if (next.plan !== undefined && planLoadedForJobRef.current !== next.jobId) {
       planLoadedForJobRef.current = next.jobId
       setPlan(clonePlan(next.plan))
@@ -243,6 +243,7 @@ export function PresentationDocumentDialog({
     if (jobId === null) return
     void loadJob(jobId).catch((loadError) => {
       persistJobId(sessionId, null)
+      onJobChange(null)
       setError(`恢复上次任务失败：${describeError(loadError)}`)
     })
   }, [sessionId])
@@ -279,6 +280,7 @@ export function PresentationDocumentDialog({
 
   function reset(): void {
     persistJobId(sessionId, null)
+    onJobChange(null)
     planLoadedForJobRef.current = null
     previewOpenedRef.current = null
     setSnapshot(null)
@@ -329,6 +331,7 @@ export function PresentationDocumentDialog({
       uploadAbortControllerRef.current = null
       setSourceProcessing(false)
       persistJobId(sessionId, next.jobId)
+      onJobChange(next.jobId)
       setSnapshot(next)
       setRequestedPhase('planning')
       await onRequestOutline(next.source, brief)

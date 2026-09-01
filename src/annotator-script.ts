@@ -25,6 +25,8 @@ export const ANNOTATOR_SCRIPT = String.raw`
   const guideX = ui('div', 'guide-x', 'position:fixed;top:0;bottom:0;z-index:2147483645;pointer-events:none;width:1px;background:#ffcb6b;display:none;box-shadow:0 0 0 1px rgba(0,0,0,.18)');
   const guideY = ui('div', 'guide-y', 'position:fixed;left:0;right:0;z-index:2147483645;pointer-events:none;height:1px;background:#ffcb6b;display:none;box-shadow:0 0 0 1px rgba(0,0,0,.18)');
   const measure = ui('div', 'measure', 'position:fixed;z-index:2147483646;pointer-events:none;display:none;padding:5px 7px;border-radius:6px;background:rgba(15,24,20,.92);color:#eef7f0;font:600 11px/1.3 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.28);white-space:nowrap');
+  const imageSlotOverlay = ui('div', 'image-slot-overlay', 'position:fixed;z-index:2147483644;pointer-events:none;display:none;border:2px dashed #88c99a;border-radius:7px;box-sizing:border-box;background:rgba(136,201,154,.08)');
+  const imageSlotBadge = ui('div', 'image-slot-badge', 'position:fixed;z-index:2147483645;pointer-events:none;display:none;padding:5px 8px;border-radius:6px;background:#eff9f1;color:#173d24;font:700 11px/1.2 system-ui,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.22);white-space:nowrap');
   const areaActions = ui('div', 'area-actions', 'position:fixed;z-index:2147483647;display:none;align-items:center;gap:6px;padding:5px;border:1px solid rgba(255,255,255,.45);border-radius:9px;background:rgba(20,28,39,.94);box-shadow:0 8px 24px rgba(0,0,0,.3);font:600 12px/1.2 system-ui,sans-serif;pointer-events:auto');
   const confirmAreaButton = document.createElement('button');
   confirmAreaButton.type = 'button';
@@ -70,6 +72,11 @@ export const ANNOTATOR_SCRIPT = String.raw`
   let draftRawBounds = null;
   let draftBounds = null;
   let draftGuides = [];
+  let assetBindings = new Map();
+  let assetApplyFrame = null;
+  let hoveredImageSlot = null;
+  const imageStates = new WeakMap();
+  const slotStates = new WeakMap();
 
   const isUi = (node) => node instanceof Element && Boolean(node.closest('[data-dsh-annotator-ui]'));
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -148,6 +155,135 @@ export const ANNOTATOR_SCRIPT = String.raw`
     return Array.from(document.querySelectorAll('[data-pagecraft-slide-id]'))
       .filter((element) => element instanceof HTMLElement && !isUi(element))
       .slice(0, 100);
+  }
+
+  function imageSlotFor(target) {
+    if (!(target instanceof Element)) return null;
+    const slot = target.closest('[data-pagecraft-image-slot]');
+    if (!(slot instanceof HTMLElement) || isUi(slot)) return null;
+    const slotId = slot.getAttribute('data-pagecraft-image-slot');
+    return slotId && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/.test(slotId) ? slot : null;
+  }
+
+  function rememberSlot(slot) {
+    let state = slotStates.get(slot);
+    if (state) return state;
+    state = {
+      outline: slot.style.outline,
+      outlineOffset: slot.style.outlineOffset,
+      cursor: slot.style.cursor,
+      title: slot.getAttribute('title')
+    };
+    slotStates.set(slot, state);
+    return state;
+  }
+
+  function rememberImage(image, created) {
+    let state = imageStates.get(image);
+    if (state) return state;
+    state = {
+      created,
+      src: image.getAttribute('src'),
+      width: image.style.width,
+      height: image.style.height,
+      display: image.style.display,
+      objectFit: image.style.objectFit,
+      objectPosition: image.style.objectPosition
+    };
+    imageStates.set(image, state);
+    return state;
+  }
+
+  function restoreImage(image) {
+    const state = imageStates.get(image);
+    if (!state) return;
+    if (state.created) {
+      image.remove();
+      return;
+    }
+    if (state.src === null) image.removeAttribute('src');
+    else image.setAttribute('src', state.src);
+    image.style.width = state.width;
+    image.style.height = state.height;
+    image.style.display = state.display;
+    image.style.objectFit = state.objectFit;
+    image.style.objectPosition = state.objectPosition;
+    image.removeAttribute('data-pagecraft-asset-id');
+  }
+
+  function applyImageSlot(slot) {
+    const slotId = slot.getAttribute('data-pagecraft-image-slot');
+    if (!slotId) return;
+    const binding = assetBindings.get(slotId);
+    const slotState = rememberSlot(slot);
+    let image = slot instanceof HTMLImageElement ? slot : slot.querySelector('img');
+    if (!binding) {
+      if (image instanceof HTMLImageElement) restoreImage(image);
+      slot.removeAttribute('data-pagecraft-asset-id');
+      slot.setAttribute('data-pagecraft-slot-state', 'empty');
+      slot.style.outline = '2px dashed rgba(136, 201, 154, .72)';
+      slot.style.outlineOffset = '-2px';
+      slot.style.cursor = 'pointer';
+      if (slotState.title === null) slot.setAttribute('title', '点击选择图片素材');
+      return;
+    }
+    if (!(image instanceof HTMLImageElement)) {
+      image = document.createElement('img');
+      image.alt = slot.getAttribute('data-pagecraft-slot-label') || '演示文稿图片';
+      slot.appendChild(image);
+      rememberImage(image, true);
+    } else {
+      rememberImage(image, false);
+    }
+    image.src = binding.url;
+    image.style.width = '100%';
+    image.style.height = '100%';
+    image.style.display = 'block';
+    image.style.objectFit = binding.fit;
+    image.style.objectPosition = Math.round(binding.focalPoint.x * 100) + '% ' + Math.round(binding.focalPoint.y * 100) + '%';
+    image.setAttribute('data-pagecraft-asset-id', binding.assetId);
+    slot.setAttribute('data-pagecraft-asset-id', binding.assetId);
+    slot.setAttribute('data-pagecraft-slot-state', 'filled');
+    slot.style.outline = slotState.outline;
+    slot.style.outlineOffset = slotState.outlineOffset;
+    slot.style.cursor = 'pointer';
+    if (slotState.title === null) slot.setAttribute('title', '点击替换或调整图片');
+  }
+
+  function applyAllImageSlots() {
+    for (const slot of document.querySelectorAll('[data-pagecraft-image-slot]')) {
+      if (slot instanceof HTMLElement && !isUi(slot)) applyImageSlot(slot);
+    }
+    if (hoveredImageSlot && !hoveredImageSlot.isConnected) hoveredImageSlot = null;
+  }
+
+  function scheduleAssetApplication() {
+    if (assetApplyFrame !== null) cancelAnimationFrame(assetApplyFrame);
+    assetApplyFrame = requestAnimationFrame(() => {
+      assetApplyFrame = null;
+      applyAllImageSlots();
+    });
+  }
+
+  function updateImageSlotOverlay(target) {
+    const slot = mode === null ? imageSlotFor(target) : null;
+    hoveredImageSlot = slot;
+    if (!slot) {
+      imageSlotOverlay.style.display = 'none';
+      imageSlotBadge.style.display = 'none';
+      return;
+    }
+    const bounds = slot.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    imageSlotOverlay.style.display = 'block';
+    imageSlotOverlay.style.left = bounds.left + 'px';
+    imageSlotOverlay.style.top = bounds.top + 'px';
+    imageSlotOverlay.style.width = bounds.width + 'px';
+    imageSlotOverlay.style.height = bounds.height + 'px';
+    imageSlotBadge.textContent = slot.getAttribute('data-pagecraft-slot-label') || '图片槽位';
+    imageSlotBadge.style.display = 'block';
+    imageSlotBadge.style.left = clamp(bounds.left + 6, 6, Math.max(6, innerWidth - 150)) + 'px';
+    imageSlotBadge.style.top = clamp(bounds.top + 6, 6, Math.max(6, innerHeight - 30)) + 'px';
   }
 
   function presentationSlideTitle(element, index) {
@@ -231,6 +367,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
       current = current.parentElement;
     }
     const presentation = presentationContextFor(element);
+    const textOwner = element.closest('[data-pagecraft-text-key]');
     return {
       kind: 'element',
       url: document.baseURI,
@@ -238,6 +375,8 @@ export const ANNOTATOR_SCRIPT = String.raw`
       selector: selectorFor(element),
       domPath: path.join(' > '),
       text: (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 240),
+      ...(textOwner ? { textKey: textOwner.getAttribute('data-pagecraft-text-key') || undefined } : {}),
+      ...(textOwner ? { editableText: (textOwner.textContent || '').trim().slice(0, 5000) } : {}),
       html: htmlSnippet(element, MAX_ELEMENT_HTML),
       container: domSnapshot(containerForElement(element), MAX_CONTAINER_HTML),
       rect: {
@@ -250,6 +389,87 @@ export const ANNOTATOR_SCRIPT = String.raw`
     };
   }
 
+  function normalizedText(element, maxLength = 2000) {
+    return (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, maxLength);
+  }
+
+  function textTargetFor(element) {
+    const keyed = element.closest('[data-pagecraft-text-key]');
+    if (keyed instanceof HTMLElement && !isUi(keyed)) return keyed;
+    let current = element;
+    for (let depth = 0; depth < 5 && current instanceof Element && current !== document.body; depth += 1) {
+      if (!current.matches('script, style, noscript, template, input, textarea, select, canvas, svg') && normalizedText(current).length > 0) return current;
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function safeTextAttributes(element) {
+    const attributes = {};
+    const allowed = ['id', 'name', 'role', 'data-testid', 'data-pagecraft-slide-id', 'data-pagecraft-text-key'];
+    for (const name of allowed) {
+      const value = element.getAttribute(name);
+      if (value) attributes[name] = value.slice(0, 500);
+    }
+    if (element.classList.length > 0) attributes.class = Array.from(element.classList).slice(0, 4).join(' ').slice(0, 500);
+    return attributes;
+  }
+
+  function nearbyTextFor(element) {
+    const candidates = [];
+    const parent = element.parentElement;
+    if (parent) {
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === element || isUi(sibling)) continue;
+        const text = normalizedText(sibling, 120);
+        if (text && !candidates.includes(text)) candidates.push(text);
+        if (candidates.length >= 4) break;
+      }
+    }
+    return candidates;
+  }
+
+  function textFingerprint(element, textKey, presentation) {
+    if (textKey) return 'text-key|' + textKey;
+    const parent = element.parentElement;
+    const siblingIndex = parent ? Array.from(parent.children).indexOf(element) : 0;
+    return [presentation?.slideId || '', element.localName, selectorFor(element), siblingIndex].join('|').slice(0, 1000);
+  }
+
+  function describeText(element) {
+    const target = textTargetFor(element);
+    if (!target) return null;
+    const presentation = presentationContextFor(target);
+    const textKey = target.getAttribute('data-pagecraft-text-key') || undefined;
+    return {
+      pageUrl: document.baseURI,
+      framePath: [],
+      selector: selectorFor(target),
+      fingerprint: textFingerprint(target, textKey, presentation),
+      displayedText: normalizedText(target),
+      tagName: target.localName,
+      attributes: safeTextAttributes(target),
+      nearbyText: nearbyTextFor(target),
+      ...(presentation ? { slideId: presentation.slideId } : {}),
+      ...(textKey ? { textKey } : {})
+    };
+  }
+
+  function findTextVerificationTarget(selection) {
+    if (!selection || typeof selection !== 'object') return null;
+    if (typeof selection.textKey === 'string' && selection.textKey) {
+      const keyed = document.querySelector('[data-pagecraft-text-key="' + CSS.escape(selection.textKey) + '"]');
+      if (keyed instanceof Element) return keyed;
+    }
+    if (typeof selection.selector !== 'string' || !selection.selector) return null;
+    try {
+      const target = document.querySelector(selection.selector);
+      return target instanceof Element ? target : null;
+    } catch {
+      return null;
+    }
+  }
+
   function hideGuides() {
     guideX.style.display = 'none';
     guideY.style.display = 'none';
@@ -258,6 +478,10 @@ export const ANNOTATOR_SCRIPT = String.raw`
   function renderState() {
     areaCapture.style.display = mode === 'area' ? 'block' : 'none';
     if (mode !== 'element') elementOverlay.style.display = 'none';
+    if (mode !== null) {
+      imageSlotOverlay.style.display = 'none';
+      imageSlotBadge.style.display = 'none';
+    }
     if (mode !== 'area') {
       cancelAreaInteraction();
       areaOverlay.style.display = 'none';
@@ -270,7 +494,7 @@ export const ANNOTATOR_SCRIPT = String.raw`
   }
 
   function setMode(next) {
-    const normalized = next === 'element' || next === 'area' ? next : null;
+    const normalized = next === 'element' || next === 'area' || next === 'text' ? next : null;
     mode = normalized;
     root.setAttribute('data-dsh-annotator-mode', normalized || 'browse');
     renderState();
@@ -285,11 +509,16 @@ export const ANNOTATOR_SCRIPT = String.raw`
   }
 
   function highlight(element) {
-    if (mode !== 'element' || !(element instanceof Element) || element === root || element === document.body || isUi(element)) {
+    if ((mode !== 'element' && mode !== 'text') || !(element instanceof Element) || element === root || element === document.body || isUi(element)) {
       elementOverlay.style.display = 'none';
       return;
     }
-    const bounds = element.getBoundingClientRect();
+    const highlighted = mode === 'text' ? textTargetFor(element) : element;
+    if (!(highlighted instanceof Element)) {
+      elementOverlay.style.display = 'none';
+      return;
+    }
+    const bounds = highlighted.getBoundingClientRect();
     elementOverlay.style.display = 'block';
     elementOverlay.style.left = bounds.left + 'px';
     elementOverlay.style.top = bounds.top + 'px';
@@ -803,6 +1032,25 @@ export const ANNOTATOR_SCRIPT = String.raw`
       clearAreaDraft(false);
       return;
     }
+    if (event.data?.type === 'dsh-pagecraft-verify-text' && typeof event.data.transactionId === 'string') {
+      const target = findTextVerificationTarget(event.data.selection);
+      post({
+        type: 'dsh-pagecraft-text-verification',
+        transactionId: event.data.transactionId,
+        found: target instanceof Element,
+        observedText: target instanceof Element ? normalizedText(target, 10000) : undefined
+      });
+      return;
+    }
+    if (event.data?.type === 'dsh-pagecraft-convert-text-selection') {
+      const target = findTextVerificationTarget(event.data.selection);
+      if (target instanceof Element) {
+        post({ type: 'dsh-frontend-feedback-selected', payload: describeElement(target) });
+      } else {
+        post({ type: 'dsh-frontend-feedback-selection-error', message: '原来的文字位置已经变化，请重新选择元素。' });
+      }
+      return;
+    }
     if (event.data?.type === 'dsh-frontend-feedback-restore-area') {
       const rect = event.data.rect;
       if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)) return;
@@ -814,11 +1062,41 @@ export const ANNOTATOR_SCRIPT = String.raw`
       renderArea(draftBounds, draftGuides, false, true);
       return;
     }
+    if (event.data?.type === 'dsh-pagecraft-asset-bindings' && Array.isArray(event.data.bindings)) {
+      const nextBindings = new Map();
+      for (const binding of event.data.bindings.slice(0, 500)) {
+        if (!binding || typeof binding.slotId !== 'string' || typeof binding.assetId !== 'string' || typeof binding.url !== 'string') continue;
+        if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$/.test(binding.slotId)) continue;
+        let target;
+        try {
+          target = new URL(binding.url, document.baseURI);
+        } catch {
+          continue;
+        }
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') continue;
+        const point = binding.focalPoint && typeof binding.focalPoint === 'object' ? binding.focalPoint : {};
+        nextBindings.set(binding.slotId, {
+          assetId: binding.assetId,
+          url: target.href,
+          fit: binding.fit === 'contain' ? 'contain' : 'cover',
+          focalPoint: {
+            x: clamp(Number.isFinite(point.x) ? point.x : 0.5, 0, 1),
+            y: clamp(Number.isFinite(point.y) ? point.y : 0.5, 0, 1)
+          }
+        });
+      }
+      assetBindings = nextBindings;
+      scheduleAssetApplication();
+      return;
+    }
     if (event.data?.type === 'dsh-frontend-feedback-request-deck-state') notifyDeckState(true);
     if (event.data?.type === 'dsh-frontend-feedback-select-slide' && typeof event.data.slideId === 'string') selectPresentationSlide(event.data.slideId);
   });
 
-  document.addEventListener('mouseover', (event) => highlight(event.target), true);
+  document.addEventListener('mouseover', (event) => {
+    highlight(event.target);
+    updateImageSlotOverlay(event.target);
+  }, true);
   document.addEventListener('click', (event) => {
     if (!(event.target instanceof Element) || isUi(event.target)) return;
     if (mode === 'element') {
@@ -826,8 +1104,29 @@ export const ANNOTATOR_SCRIPT = String.raw`
       post({ type: 'dsh-frontend-feedback-selected', payload: describeElement(event.target) });
       return;
     }
+    if (mode === 'text') {
+      consume(event);
+      const payload = describeText(event.target);
+      if (payload) post({ type: 'dsh-pagecraft-text-selected', payload });
+      else post({ type: 'dsh-frontend-feedback-selection-error', message: '这里没有可直接修改的文字，请选择文字所在的标题或段落。' });
+      return;
+    }
     if (mode === 'area') {
       consume(event);
+      return;
+    }
+    const imageSlot = imageSlotFor(event.target);
+    if (imageSlot) {
+      consume(event);
+      const presentation = presentationContextFor(imageSlot);
+      post({
+        type: 'dsh-pagecraft-image-slot-selected',
+        slotId: imageSlot.getAttribute('data-pagecraft-image-slot'),
+        imageKey: imageSlot.getAttribute('data-pagecraft-image-key') || undefined,
+        label: imageSlot.getAttribute('data-pagecraft-slot-label') || '图片槽位',
+        assetId: imageSlot.getAttribute('data-pagecraft-asset-id') || undefined,
+        ...(presentation ? { slideId: presentation.slideId } : {})
+      });
       return;
     }
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -932,18 +1231,28 @@ export const ANNOTATOR_SCRIPT = String.raw`
     clearAreaDraft();
   });
 
-  const deckObserver = new MutationObserver(() => scheduleDeckState());
+  const deckObserver = new MutationObserver(() => {
+    scheduleDeckState();
+    scheduleAssetApplication();
+  });
   deckObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['data-pagecraft-slide-id', 'data-pagecraft-slide-title']
+    attributeFilter: ['data-pagecraft-slide-id', 'data-pagecraft-slide-title', 'data-pagecraft-image-slot', 'data-pagecraft-image-key', 'data-pagecraft-slot-label']
   });
-  document.addEventListener('scroll', () => scheduleDeckState(), true);
-  window.addEventListener('resize', () => scheduleDeckState());
+  document.addEventListener('scroll', () => {
+    scheduleDeckState();
+    updateImageSlotOverlay(hoveredImageSlot);
+  }, true);
+  window.addEventListener('resize', () => {
+    scheduleDeckState();
+    updateImageSlotOverlay(hoveredImageSlot);
+  });
 
   renderState();
   scheduleDeckState(true);
-  post({ type: 'dsh-frontend-feedback-ready', url: document.baseURI, modes: ['element', 'area'] });
+  scheduleAssetApplication();
+  post({ type: 'dsh-frontend-feedback-ready', url: document.baseURI, modes: ['element', 'area', 'text'] });
 })();
 `

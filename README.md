@@ -21,6 +21,9 @@ PageCraft keeps that context attached to the feedback. It captures the selected 
 - **Point at real UI** — select rendered DOM elements instead of describing them from memory.
 - **Draw what does not exist yet** — create, move, resize, and align a region where a new component should be added.
 - **Refine pages and presentations** — use the same annotation workflow for normal web pages and interactive HTML/React slide decks.
+- **Work against the real project tree** — open the current Harness workspace or any child folder, edit the same files used by VS Code and the Agent, preview images in place, resolve conflicts, and restore recent versions.
+- **Change visible text without an Agent** — click rendered text, enter the replacement, and let PageCraft locate the unique local source, write it atomically, refresh the page, and roll back automatically if the DOM does not change.
+- **Persist presentation imagery** — upload images into the project, click a generated image slot, and write the selected source, crop mode, and focal point back to `deck.json`.
 - **Stay in the loop** — navigate with back, forward, and refresh; drafts and queues survive panel reloads and Harness restarts.
 - **Send implementation-ready context** — batch multiple comments into structured JSON with DOM evidence, layout intent, slide identity, and precomputed geometry.
 - **Build with dedicated Skills** — `frontend-page-builder` and `presentation-builder` keep page and deck generation rules separate from the annotation engine.
@@ -49,6 +52,8 @@ Open the Harness URL printed in the terminal, select a workspace, and choose **P
 3. Write one or more comments, add them to the queue, and select **Send to Agent**.
 4. PageCraft reloads the preview when the Agent finishes while preserving any unsent work.
 
+For a small text-only change, open **Files**, choose **Select text**, click the rendered heading or paragraph, and enter its replacement. PageCraft handles common HTML, React/TSX, Vue, Svelte, Markdown, JSON/i18n, and PageCraft deck sources without sending a chat message or consuming model tokens. It writes only when one high-confidence source location is available; ambiguous, runtime, remote, or out-of-folder content is left untouched with a plain-language explanation.
+
 Area annotations support three explicit layout intents:
 
 - **Insert** — add content to normal layout flow and move following content.
@@ -62,8 +67,10 @@ Area annotations support three explicit layout intents:
 3. PageCraft extracts the source into the workspace. The Agent creates an editable outline first; reorder, rename, add, or remove slides before approving it.
 4. After approval, the Agent generates slides in small batches. PageCraft persists the job, displays per-slide progress, and opens the preview URL as soon as it is available.
 5. PageCraft discovers the rendered slides and lets you refine each one with DOM or adjustable-region annotations.
+6. Open **Project images**, or click a generated image slot in the preview, to upload PNG, JPEG, WebP, or GIF files. Choose `cover` or `contain`, adjust the focal point, and save the result into the project.
+7. Open **Files** to browse the deck's real on-disk structure. Edit the canonical `deck.json`, renderer, and theme beside a live preview; save with `Ctrl+S`, resolve Agent conflicts explicitly, restore a recent version, or directly change selected slide text.
 
-Document content is stored under `.pagecraft/presentations/` in the active workspace instead of being copied wholesale into one prompt. New decks use a restrained light visual system by default. The current workflow targets interactive HTML/React decks; PPTX/PDF export is not implemented yet.
+Imported documents, outlines, and generation status stay under `.pagecraft/presentations/`; editable deck source normally lives under `src/presentation/`, while user-managed images live under `public/pagecraft-assets/`. A small `pagecraft-presentation.json` manifest describes the deck data and managed image locations; it does not rearrange the file Explorer. Image files remain in their physical directories, are content-deduplicated, and cannot be deleted while a slide still references them. Because the image reference is stored in the project, the PageCraft preview and a normal browser tab render the same result.
 
 ## What the Agent receives
 
@@ -116,11 +123,13 @@ Current Agent + matching builder Skill
     └──────────────► source update ► preview refresh
 ```
 
-PageCraft has three main layers:
+PageCraft has five main layers:
 
 1. **Preview** — a small browser inside Harness with navigation and a host-side proxy for local or permitted remote pages.
 2. **Annotation** — an injected script for DOM hit testing, adjustable rectangles, alignment guides, container discovery, and slide metadata.
 3. **Agent handoff** — a queue that turns visual feedback into `[frontend-feedback]` or `[presentation-feedback]` work orders.
+4. **Real workspace** — a session-scoped file service that keeps the physical directory tree, CodeMirror editor, image preview, disk watcher, atomic saves, conflict detection, and bounded history synchronized with external tools.
+5. **Direct text transaction** — a bounded static resolver maps selected DOM text to one local source range, writes the smallest change, verifies the refreshed DOM, and conditionally rolls back on failure. Presentation manifests remain responsible only for deck semantics and managed image bindings.
 
 ## Configuration
 
@@ -135,6 +144,9 @@ Localhost pages are always supported. Remote hosts can be enabled globally or al
       - preview.example.com
     maxHtmlBytes: 5242880
     maxResourceBytes: 20971520
+    maxPresentationAssetBytes: 20971520
+    maxPresentationSourceBytes: 2097152
+    maxWorkspaceTextBytes: 2097152
     requestTimeoutMs: 15000
 ```
 
@@ -165,6 +177,8 @@ Run `npm run build` after source changes and refresh Harness. `npm run check` bu
 - External sites may deliberately block embedding, automation, or proxied resources.
 - Document import supports PDF, DOCX, Markdown, and UTF-8 text up to 25 MB. Scanned PDFs require OCR and are rejected in this version.
 - Presentation mode currently creates and refines browser-based decks; native PPTX/PDF export and master-slide editing are future work.
+- Direct text editing is intentionally conservative: dynamic API data, computed runtime strings, ambiguous literals, generated bundles, and source outside the opened folder are never guessed. Stable `data-pagecraft-text-key` markers make deck edits deterministic but are not required for unique static text.
+- Managed image-slot editing requires a PageCraft presentation manifest and stable `data-pagecraft-image-key` markers. Older decks can be migrated only when PageCraft can identify one unambiguous deck source.
 
 ## Roadmap
 
