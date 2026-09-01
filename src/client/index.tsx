@@ -3,11 +3,15 @@ import { createPortal } from 'react-dom'
 import {
   buildPresentationDocumentPrompt,
   buildPresentationOutlinePrompt,
+  isPresentationJobId,
+  presentationJobStorageKey,
   resolvePresentationSlides,
 } from '../presentation.ts'
 import type {
   PageCraftMode,
   PresentationDocumentBrief,
+  PresentationAssetManifest,
+  PresentationImageSlotSelection,
   PresentationSlideSummary,
   PresentationSourceSummary,
 } from '../presentation.ts'
@@ -30,6 +34,14 @@ import {
 } from '../shared.ts'
 import type { AreaOperation, FeedbackComment, FeedbackDraftState, FeedbackSelection, PreviewNavigationState } from '../shared.ts'
 import { PresentationDocumentDialog, SlideRail } from './presentation.tsx'
+import {
+  AssetLibraryDialog,
+  emptyPresentationAssetManifest,
+  loadPresentationAssets,
+  presentationAssetUrl,
+} from './assets.tsx'
+import { WorkspaceExplorer } from './source-workspace.tsx'
+import { ProjectAssetLibraryDialog } from './project-assets.tsx'
 
 export const inject = ['slots', 'sessions']
 
@@ -59,6 +71,11 @@ interface FeedbackMessage {
   rect?: { width?: unknown; height?: unknown }
   slides?: unknown
   activeSlideId?: unknown
+  slotId?: unknown
+  slideId?: unknown
+  label?: unknown
+  assetId?: unknown
+  imageKey?: unknown
 }
 
 const colors = {
@@ -73,6 +90,16 @@ const colors = {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function readApiJson<T>(response: Response): Promise<T> {
+  const value = await response.json().catch(() => null) as T & { error?: { message?: string } } | null
+  if (!response.ok) throw new Error(value?.error?.message ?? `请求失败（HTTP ${response.status}）`)
+  return value as T
+}
+
+function presentationQuery(sessionId: string, values: Record<string, string> = {}): URLSearchParams {
+  return new URLSearchParams({ sessionId, ...values })
 }
 
 function useSessionRunning(activity: SessionActivity | null): boolean {
@@ -216,6 +243,15 @@ function FrontendFeedbackPanel({
   const [activeSlideId, setActiveSlideId] = useState<string | null>(null)
   const [showPresentationBrief, setShowPresentationBrief] = useState(false)
   const [creatingPresentation, setCreatingPresentation] = useState(false)
+  const [presentationJobId, setPresentationJobId] = useState<string | null>(() => {
+    const stored = readStoredValue(presentationJobStorageKey(sessionId))
+    return isPresentationJobId(stored) ? stored : null
+  })
+  const [assetManifest, setAssetManifest] = useState<PresentationAssetManifest>(emptyPresentationAssetManifest)
+  const [showAssetLibrary, setShowAssetLibrary] = useState(false)
+  const [showProjectAssetLibrary, setShowProjectAssetLibrary] = useState(false)
+  const [showSourceWorkspace, setShowSourceWorkspace] = useState(false)
+  const [selectedImageSlot, setSelectedImageSlot] = useState<PresentationImageSlotSelection | null>(null)
   const loadedUrl = currentPreviewUrl(navigation)
   const canGoBack = navigation.index > 0
   const canGoForward = navigation.index < navigation.entries.length - 1
@@ -227,6 +263,37 @@ function FrontendFeedbackPanel({
   useEffect(() => {
     persistFeedbackDraft(storageId, { selection, areaOperation, comment, queued })
   }, [areaOperation, comment, queued, selection, storageId])
+
+  useEffect(() => {
+    if (presentationJobId === null) {
+      setAssetManifest(emptyPresentationAssetManifest())
+      setShowAssetLibrary(false)
+      setSelectedImageSlot(null)
+      return
+    }
+    let cancelled = false
+    void loadPresentationAssets(sessionId, presentationJobId).then((manifest) => {
+      if (!cancelled) setAssetManifest(manifest)
+    }).catch((assetError) => {
+      if (!cancelled) setStatus(`读取图片素材库失败：${describeError(assetError)}`)
+    })
+    return () => { cancelled = true }
+  }, [presentationJobId, sessionId])
+
+  const postAssetBindings = useCallback((manifest: PresentationAssetManifest) => {
+    if (workspaceMode !== 'presentation' || presentationJobId === null) return
+    iframeRef.current?.contentWindow?.postMessage({
+      type: 'dsh-pagecraft-asset-bindings',
+      bindings: manifest.bindings.map(binding => ({
+        ...binding,
+        url: presentationAssetUrl(sessionId, presentationJobId, binding.assetId),
+      })),
+    }, '*')
+  }, [presentationJobId, sessionId, workspaceMode])
+
+  useEffect(() => {
+    postAssetBindings(assetManifest)
+  }, [assetManifest, postAssetBindings])
 
   const commitNavigation = useCallback((next: PreviewNavigationState, nextStatus: string) => {
     refreshNoticeRef.current = null
@@ -292,6 +359,7 @@ function FrontendFeedbackPanel({
           iframeRef.current?.contentWindow?.postMessage({
             type: 'dsh-frontend-feedback-request-deck-state',
           }, '*')
+          postAssetBindings(assetManifest)
         }
         if (selection?.kind === 'area') {
           iframeRef.current?.contentWindow?.postMessage({
@@ -304,6 +372,29 @@ function FrontendFeedbackPanel({
         setStatus(refreshNotice ?? (workspaceMode === 'presentation'
           ? '预览已加载。若页面含有 PageCraft 幻灯片标记，左侧会自动列出各页。'
           : '预览已加载。可选择 DOM 元素，或拖动框选区域来新增内容。'))
+        return
+      }
+      if (event.data?.type === 'dsh-pagecraft-image-slot-selected') {
+        if (workspaceMode !== 'presentation' || typeof event.data.slotId !== 'string') return
+        const nextImageSlot: PresentationImageSlotSelection = {
+          slotId: event.data.slotId,
+          ...(typeof event.data.slideId === 'string' ? { slideId: event.data.slideId } : {}),
+          ...(typeof event.data.label === 'string' ? { label: event.data.label } : {}),
+          ...(typeof event.data.assetId === 'string' ? { assetId: event.data.assetId } : {}),
+          ...(typeof event.data.imageKey === 'string' ? { imageKey: event.data.imageKey } : {}),
+        }
+        setSelectedImageSlot(nextImageSlot)
+        if (nextImageSlot.imageKey !== undefined) {
+          setShowProjectAssetLibrary(true)
+          setStatus('已打开图片槽位。选择图片后会直接写回 PPT 项目源码。')
+          return
+        }
+        if (presentationJobId === null) {
+          setStatus('这是旧版图片槽位，并且没有关联的演示任务。可先在源码工作区迁移这个 PPT。')
+          return
+        }
+        setShowAssetLibrary(true)
+        setStatus('已打开旧版图片槽位；本次绑定只作用于任务预览，迁移后可写回项目。')
         return
       }
       if (event.data?.type === 'dsh-frontend-feedback-deck-state') {
@@ -363,7 +454,7 @@ function FrontendFeedbackPanel({
     }
     window.addEventListener('message', listener)
     return () => window.removeEventListener('message', listener)
-  }, [navigatePreview, selection, workspaceMode])
+  }, [assetManifest, navigatePreview, postAssetBindings, presentationJobId, selection, workspaceMode])
 
   const openPreview = () => {
     navigatePreview(urlDraft)
@@ -531,8 +622,27 @@ function FrontendFeedbackPanel({
           />
           <button type="button" onClick={openPreview} style={styles.secondaryButton}>打开</button>
           {workspaceMode === 'presentation' ? (
-            <button type="button" onClick={() => setShowPresentationBrief(true)} style={styles.createPresentationButton}>上传文档生成</button>
+            <>
+              <button type="button" onClick={() => setShowPresentationBrief(true)} style={styles.createPresentationButton}>上传文档生成</button>
+              <button
+                type="button"
+                disabled={!hasSession}
+                title={hasSession ? '管理保存在 PPT 项目目录中的图片素材' : '先创建会话后才能读取当前项目目录'}
+                onClick={() => {
+                  setSelectedImageSlot(null)
+                  setShowProjectAssetLibrary(true)
+                }}
+                style={{ ...styles.assetLibraryButton, ...(!hasSession ? styles.iconButtonDisabled : {}) }}
+              >项目图片</button>
+            </>
           ) : null}
+          <button
+            type="button"
+            disabled={!hasSession}
+            title={hasSession ? '打开与本地目录同步的文件工作区' : '先创建会话后才能读取当前项目目录'}
+            onClick={() => setShowSourceWorkspace(true)}
+            style={{ ...styles.assetLibraryButton, ...(!hasSession ? styles.iconButtonDisabled : {}) }}
+          >文件</button>
           <button
             type="button"
             aria-label="刷新"
@@ -583,6 +693,7 @@ function FrontendFeedbackPanel({
                 iframeRef.current?.contentWindow?.postMessage({
                   type: 'dsh-frontend-feedback-request-deck-state',
                 }, '*')
+                postAssetBindings(assetManifest)
               }
               if (selection?.kind === 'area') {
                 iframeRef.current?.contentWindow?.postMessage({
@@ -716,6 +827,59 @@ function FrontendFeedbackPanel({
           onRequestOutline={requestPresentationOutline}
           onRequestGeneration={requestPresentationGeneration}
           onPreviewReady={(url) => navigatePreview(url, '演示文稿预览地址已就绪，正在打开…')}
+          onJobChange={setPresentationJobId}
+        />
+      ) : null}
+      {showAssetLibrary && presentationJobId !== null ? (
+        <AssetLibraryDialog
+          sessionId={sessionId}
+          jobId={presentationJobId}
+          manifest={assetManifest}
+          selectedSlot={selectedImageSlot}
+          onClose={() => {
+            setShowAssetLibrary(false)
+            setSelectedImageSlot(null)
+          }}
+          onManifestChange={(manifest) => {
+            setAssetManifest(manifest)
+            postAssetBindings(manifest)
+          }}
+        />
+      ) : null}
+      {showSourceWorkspace ? (
+        <WorkspaceExplorer
+          sessionId={sessionId}
+          previewSrc={previewFrame.src}
+          onClose={() => setShowSourceWorkspace(false)}
+          onRefresh={() => refreshPreview('正在刷新文件工作区预览…', '本地文件修改已保存，预览已同步。')}
+          onNavigate={(url) => navigatePreview(url, '正在打开文件工作区预览中的链接…')}
+          onAnnotationSelection={(nextSelection) => {
+            setSelection(nextSelection)
+            if (nextSelection.kind === 'area') setAreaOperation('insert')
+            setComment('')
+            setStatus(nextSelection.kind === 'area'
+              ? '已从文件工作区取得框选区域，可以填写评注并加入共用队列。'
+              : '已从文件工作区选择 DOM 元素，可以填写评注并加入共用队列。')
+            if (nextSelection.kind === 'area') {
+              window.setTimeout(() => {
+                iframeRef.current?.contentWindow?.postMessage({
+                  type: 'dsh-frontend-feedback-restore-area',
+                  rect: nextSelection.rect,
+                }, '*')
+              }, 0)
+            }
+          }}
+        />
+      ) : null}
+      {showProjectAssetLibrary ? (
+        <ProjectAssetLibraryDialog
+          sessionId={sessionId}
+          selectedSlot={selectedImageSlot}
+          onClose={() => {
+            setShowProjectAssetLibrary(false)
+            setSelectedImageSlot(null)
+          }}
+          onRefresh={() => refreshPreview('图片已写入项目，正在刷新预览…', '项目图片已更新。')}
         />
       ) : null}
     </div>
@@ -743,7 +907,7 @@ export function FrontendFeedbackLauncher(props: FrontendFeedbackInjected) {
   useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape' && document.querySelector('[data-pagecraft-source-workspace]') === null) setOpen(false)
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -803,6 +967,7 @@ const styles: Record<string, any> = {
   input: { minWidth: 180, maxWidth: 620, flex: 1, height: 36, padding: '0 12px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: '#0a0f0d', outline: 'none' },
   secondaryButton: { height: 36, padding: '0 14px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer' },
   createPresentationButton: { height: 36, padding: '0 13px', border: `1px solid ${colors.accent}`, borderRadius: 8, color: '#102016', background: colors.accentStrong, cursor: 'pointer', fontWeight: 800, whiteSpace: 'nowrap' },
+  assetLibraryButton: { height: 36, padding: '0 13px', border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontWeight: 700, whiteSpace: 'nowrap' },
   iconButton: { width: 36, height: 36, border: `1px solid ${colors.border}`, borderRadius: 8, color: colors.text, background: colors.panel2, cursor: 'pointer', fontSize: 18 },
   iconButtonDisabled: { opacity: .35, cursor: 'not-allowed' },
   modeGroup: { display: 'inline-flex', alignItems: 'center', gap: 5, padding: 3, border: `1px solid ${colors.border}`, borderRadius: 10, background: '#0a0f0d' },
